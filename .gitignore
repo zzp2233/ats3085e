@@ -1,0 +1,19 @@
+# ---- 编译输出目录（app 编译产物，占 727MB，不入库）----
+outdir/
+application/**/outdir/
+**/_firmware/
+
+# ---- 编译中间文件（仅在 outdir 内出现，双保险）----
+*.o
+*.d
+*.su
+
+# ---- 日志与临时文件 ----
+logs/
+*.log
+*.swp
+*.tmp
+Thumbs.db
+desktop.ini
+
+# ---- 注：.elf / .bin / .a / .lib / .FW 均为 SDK 预编译工具或库，务必入库，不要忽略 ----

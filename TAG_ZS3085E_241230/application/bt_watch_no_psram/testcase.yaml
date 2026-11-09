@@ -1,0 +1,40 @@
+sample:
+  description: bt watch no psram application
+    application
+  name: bt_watch
+
+common:
+    tags: integration
+    integration_platforms:
+      - ats3085l_dvb_watch_ext_nor_max
+      - ats3085e_dvb_watch_ext_nor_max
+
+    harness: console
+    harness_config:
+      type: one_line
+      regex:
+        - "system ready ! (.*)"
+tests:
+  bt_watch.full:
+    tags: integration
+
+  bt_watch.no_bt_call:
+    platform_allow: ats3085l_dvb_watch_ext_nor_max
+    extra_args: CONF_FILE=prj_no_btcall.conf
+
+  bt_watch.no_bt_music:
+    platform_allow: ats3085l_dvb_watch_ext_nor_max
+    extra_args: CONF_FILE=prj_no_bt_music.conf
+
+  bt_watch.no_local_music:
+    platform_allow: ats3085l_dvb_watch_ext_nor_max
+    extra_args: CONF_FILE=prj_no_local_music.conf
+
+  bt_watch.no_media:
+    platform_allow: ats3085l_dvb_watch_ext_nor_max
+    extra_args: CONF_FILE=prj_no_media.conf
+
+  bt_watch.no_ui:
+    platform_allow: ats3085l_dvb_watch_ext_nor_max
+    extra_args: CONF_FILE=prj_no_ui.conf
+

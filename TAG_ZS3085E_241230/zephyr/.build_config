@@ -1,0 +1,5 @@
+# Build config
+BOARD=ats3085e_dev_watch_ext_nor
+APPLICATION=bt_watch_no_psram
+SUB_APP=
+APP_CONF=

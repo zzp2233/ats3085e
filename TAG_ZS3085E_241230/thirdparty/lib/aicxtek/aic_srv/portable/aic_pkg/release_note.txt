@@ -1,0 +1,6 @@
+﻿Instructions：
+1. The firmware used in JUXIN project is gx318l_h6_juxin_debug.pkg and gx318l_h6_juxin_release.pkg.
+
+Version Info:
+2024.03.22: Update firmware to version: v24.002.00011
+2024.02.28: Update firmware to version: v24.002.00009

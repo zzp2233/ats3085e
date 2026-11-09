@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig GLYPHIX
+	bool "Glyphix 3rd JavaScript Application Runtime Library"
+	help
+	  This option enables the Glyphix library.
+
+if GLYPHIX
+
+	choice GX_SCREEN_SHAPE
+			prompt "Screen shape"
+			default GX_SCREEN_SHAPE_ROUND
+			help
+					Screen shape infomation. The application will show 
+					different layout on different screen shape.
+			config GX_SCREEN_SHAPE_ROUND
+					bool "Round"
+			config GX_SCREEN_SHAPE_RECTANGLE
+					bool "Rectangle"
+	endchoice
+
+	config GX_SCREEN_WIDTH
+			int "Screen width size"
+			default 466
+
+	if GX_SCREEN_SHAPE_RECTANGLE
+			config GX_SCREEN_HEIGHT
+			int "Screen height size"
+			default 466
+	endif #GX_SCREEN_SHAPE_RECTANGLE
+
+	if GX_SCREEN_SHAPE_ROUND
+		config GX_SCREEN_HEIGHT
+				int
+				default GX_SCREEN_WIDTH
+				help
+						"Screen height size"
+	endif #GX_SCREEN_SHAPE_ROUND
+
+endif #CONFIG_GLYPHIX

@@ -1,0 +1,88 @@
+manifest:
+  projects:
+  - name: cmsis
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_HAL_CMSIS
+    revision: b0612c97c1401feeb4160add6462c3627fe90fc7
+    path: thirdparty/hal/cmsis
+  - name: fatfs
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_FS_FATFS
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: thirdparty/fs/fatfs
+  - name: lvgl
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_LVGL
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: thirdparty/lib/gui/lvgl
+  - name: alipay
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_ALIPAY
+    revision: ZS308B_dev_v2.7
+    path: thirdparty/lib/alipay
+  - name: alipay_wxpay
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_ALIPAY_WXPAY
+    revision: ZS308B_dev_v2.7
+    path: thirdparty/lib/alipay_wxpay
+  - name: mbedtls
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_CRYPTO_MBEDTLS
+    revision: 5765cb7f75a9973ae9232d438e361a9d7bbc49e7
+    path: thirdparty/crypto/mbedtls
+  - name: segger
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_DBG_SEGGER
+    revision: 3a52ab222133193802d3c3b4d21730b9b1f1d2f6
+    path: thirdparty/debug/segger
+  - name: tinycrypt
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_CRYPTO_TINYCRYPT
+    revision: 9bdf43334d57a4c982acba7586336e69faeecc1a
+    path: thirdparty/crypto/tinycrypt
+  - name: littlefs
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_FS_LITTLEFS
+    revision: 9e4498d1c73009acd84bb36036ee5e2869112a6c
+    path: thirdparty/fs/littlefs
+  - name: bootloader
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_BOOT_LOADER
+    revision: BF1__TAG_ZS3085E_2700_240124
+  - name: framework_base
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_FRAMEWORK_BASE
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/base
+  - name: framework_system
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_SYSTEM
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/system
+  - name: audio
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_AUDIO
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/audio
+  - name: media
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_MEDIA_BASE
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/media
+  - name: ota
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_OTA
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/ota
+  - name: bluetooth
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_BLUETOOTH
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/bluetooth
+  - name: display
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_DISPLAY
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/display
+  - name: usb
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_USB
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/usb
+  - name: sensor
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_LIB_SENSOR
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: framework/sensor
+  - name: bt_watch_no_psram
+    url: ssh://192.168.4.4:29418/ZH/actions/BT_WATCH_NO_PSRAM
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: application/bt_watch_no_psram
+  - name: app_demo
+    url: ssh://192.168.4.4:29418/ZH/actions/ZSDK_APPLICATION_DEMO
+    revision: BF1__TAG_ZS3085E_2700_240124
+    path: application/app_demo
+  self:
+    path: zephyr
+    west-commands: scripts/west-commands.yml
