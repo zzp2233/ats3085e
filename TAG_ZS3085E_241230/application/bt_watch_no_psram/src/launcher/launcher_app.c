@@ -363,6 +363,10 @@ static void _launcher_app_resume(void)
 
 	app->suspended = 1;
 
+#ifdef CONFIG_UI_MANAGER
+	app_ui_paint(CTRL_SCENE, NULL);   /* 亮屏后按最新状态重绘控制中心面板 */
+#endif
+
 	SYS_LOG_INF("launcher resume\n");
 }
 

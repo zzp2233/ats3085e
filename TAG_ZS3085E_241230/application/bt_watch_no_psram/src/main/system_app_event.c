@@ -269,15 +269,27 @@ void system_hotplug_event_handle(struct app_msg *msg)
 #endif
 }
 
+/*
+ * 函数功能：处理蓝牙连接状态系统事件
+ * 执行流程：
+ *   1. 蓝牙连上/断开时，先做一次 wakelock 唤醒（保持屏幕点亮）
+ *   2. 主动给下拉控制中心面板(CTRL_SCENE)投递一次重绘请求
+ *      使其蓝牙图标实时跟随连接状态，无需用户退出再进入面板
+ *   注：面板是常驻缓存场景，自身收不到蓝牙事件，只能由外部触发重绘
+ */
 void system_bluetooth_event_handle(struct app_msg *msg)
 {
 	switch (msg->cmd) {
 #ifdef CONFIG_BT_MANAGER
 	case SYS_EVENT_BT_CONNECTED:
 	case SYS_EVENT_BT_DISCONNECTED:
+	case SYS_EVENT_BT_UNLINKED:
 	#ifdef CONFIG_SYS_WAKELOCK
 		sys_wake_lock(FULL_WAKE_LOCK);
 		sys_wake_unlock(FULL_WAKE_LOCK);
+	#endif
+	#ifdef CONFIG_UI_MANAGER
+		app_ui_paint(CTRL_SCENE, NULL);
 	#endif
 		break;
 #endif
