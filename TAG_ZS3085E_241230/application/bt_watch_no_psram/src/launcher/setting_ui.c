@@ -471,6 +471,20 @@ int view_set_ui_proc(void * scr, uint8_t msg_id, void * msg_data)
 static const uint32_t text_list_ids[] = {
 	SETTING_TEXT_1, SETTING_TEXT_2};
 
+/*
+ * 设置项文本与顺序（不动 UI 资源也能扩展）
+ * 下标 = btn_id，_setting_btn_evt_handler 按同一顺序分派
+ */
+static const char * const setting_item_names[] = {
+	"视图设置",   /* 0 */
+	"动画设置",   /* 1 */
+	"表盘切换",   /* 2 */
+	"震动设置",   /* 3 */
+	"关机",       /* 4 */
+};
+#define SETTING_ITEM_NUM   ARRAY_SIZE(setting_item_names)
+
+
 typedef struct setting_view_data {
 	lv_obj_t *tv;
 	lv_font_t font;
@@ -487,11 +501,17 @@ static void _setting_btn_evt_handler(lv_event_t *e)
 	lv_event_code_t event = lv_event_get_code(e);
 	int32_t btn_id = (int32_t)lv_obj_get_user_data(lv_event_get_current_target(e));
 	if (event == LV_EVENT_CLICKED) {
-		if(btn_id == 0)
-			app_ui_stack_forward(VIEW_SET_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);
-		else if(btn_id == 1)
-			app_ui_stack_forward(ANIM_SET_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);
-	}
+			if(btn_id == 0)
+				app_ui_stack_forward(VIEW_SET_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);
+			else if(btn_id == 1)
+				app_ui_stack_forward(ANIM_SET_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);
+			else if(btn_id == 2)
+				app_ui_stack_forward(CLOCKSEL_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);   /* 表盘切换 */
+			else if(btn_id == 3)
+				app_ui_stack_forward(VIB_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);         /* 震动设置 */
+			else if(btn_id == 4)
+				app_ui_stack_forward(POWER_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);       /* 关机 */
+		}
 }
 
 static void _setting_ui_unload_resource(setting_data_t *data)
@@ -563,13 +583,16 @@ static int _setting_view_create(lv_obj_t * scr)
 		return -ENOENT;
 	}
 
-	lv_coord_t layout_space = data->layout_2.y - data->layout_1.y;
+lv_coord_t layout_space = data->layout_2.y - data->layout_1.y;
 	data->tv = lv_obj_create(scr);
-	lv_obj_set_size(data->tv,0,0);
-	lv_obj_set_size(data->tv,DEF_UI_VIEW_WIDTH,data->layout_1.y * 2 + layout_space * ARRAY_SIZE(data->res_txt));
+	/* 5 项总高 670 > 屏 466，容器设为屏高并允许垂直滚动 */
+	lv_obj_set_size(data->tv, DEF_UI_VIEW_WIDTH, DEF_UI_VIEW_HEIGHT);
 	lv_obj_set_style_pad_all(data->tv,0,LV_PART_MAIN);
 	lv_obj_set_style_border_width(data->tv,0,LV_PART_MAIN);
-	for(uint32_t i = 0 ; i < ARRAY_SIZE(data->res_txt) ; i++)
+	lv_obj_set_scroll_dir(data->tv, LV_DIR_VER);
+	lv_obj_set_scrollbar_mode(data->tv, LV_SCROLLBAR_MODE_OFF);
+
+	for(uint32_t i = 0 ; i < SETTING_ITEM_NUM ; i++)
 	{
 		lv_obj_t *setting_icon = lv_obj_create(data->tv);
 		lv_obj_set_pos(setting_icon,data->layout_1.x,data->layout_1.y + layout_space * i);
@@ -586,10 +609,13 @@ static int _setting_view_create(lv_obj_t * scr)
 		lv_obj_align(set_text_icon,LV_ALIGN_CENTER,0,0);
 		lv_obj_set_width(set_text_icon,data->layout_1.width);
 		lv_label_set_long_mode(set_text_icon,LV_LABEL_LONG_SCROLL);
-		lv_obj_set_style_text_align(set_text_icon,LV_TEXT_ALIGN_CENTER,LV_PART_MAIN);
+			lv_obj_set_style_text_align(set_text_icon,LV_TEXT_ALIGN_CENTER,LV_PART_MAIN);
 		lv_obj_set_style_text_font(set_text_icon,&data->font,LV_PART_MAIN);
-		lv_obj_set_style_text_color(set_text_icon,data->res_txt[i].color,LV_PART_MAIN);
-		lv_label_set_text(set_text_icon,data->res_txt[i].txt);
+		/* 前两项沿用资源给的颜色，后加项用默认白 */
+		lv_obj_set_style_text_color(set_text_icon,
+			(i < ARRAY_SIZE(data->res_txt)) ? data->res_txt[i].color : lv_color_hex(0xffffff),
+			LV_PART_MAIN);
+		lv_label_set_text(set_text_icon, setting_item_names[i]);
 	}
 	 
 	lv_obj_set_user_data(scr, data);

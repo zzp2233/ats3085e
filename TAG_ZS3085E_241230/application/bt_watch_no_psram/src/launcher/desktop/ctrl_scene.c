@@ -155,6 +155,22 @@ static void _btn_evt_handler(lv_event_t * e)
 	}
 }
 
+/**
+ * @brief 控制中心"设置"按钮点击回调
+ *
+ * 处理流程：
+ *   1) 打日志，方便串口确认事件确实到达
+ *   2) 向前压栈打开 SETTING_UI（设置页）
+ *
+ * 注意：该按钮在 _ctrl_create 里被清掉了 LV_OBJ_FLAG_CHECKABLE，
+ *       不会产生 LV_EVENT_VALUE_CHANGED，所以必须单独绑 CLICKED。
+ */
+static void _btn_setting_evt_handler(lv_event_t * e)
+{
+	SYS_LOG_INF("ctrl setting clicked\n");
+	app_ui_stack_forward(SETTING_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);
+}
+
 static int _ctrl_paint(lv_obj_t * scr)
 {
 	ctrl_ui_data_t * data = lv_obj_get_user_data(scr);
@@ -226,6 +242,9 @@ static int _ctrl_create(lv_obj_t * scr, const desktop_ui_presenter_t * presenter
 
 	lv_obj_clear_flag(data->btn[BTN_BLUETOOTH], LV_OBJ_FLAG_CLICKABLE);
 	lv_obj_clear_flag(data->btn[BTN_SETTING], LV_OBJ_FLAG_CHECKABLE);
+
+	/* BTN_SETTING 不可 CHECKABLE，不会产生 VALUE_CHANGED，改为单独绑 CLICKED 打开设置页 */
+	lv_obj_add_event_cb(data->btn[BTN_SETTING], _btn_setting_evt_handler, LV_EVENT_CLICKED, scr);
 
 	/* battery */
 	data->img[IMG_BAT] = lv_img_create(scr);
