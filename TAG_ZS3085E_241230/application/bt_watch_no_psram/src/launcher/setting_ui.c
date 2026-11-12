@@ -8,6 +8,7 @@
 #include "launcher_app.h"
 #include <widgets/simple_img.h>
 #include "applist/applist_ui.h"
+#include <sys_manager.h>       /* system_set_auto_sleep_time() */
 
 static const uint32_t pic_on_off_ids[] = {
 	PIC_ENABLED,PIC_DISABILITY
@@ -481,6 +482,7 @@ static const char * const setting_item_names[] = {
 	"表盘切换",   /* 2 */
 	"震动设置",   /* 3 */
 	"关机",       /* 4 */
+	"息屏时间",   /* 5 */
 };
 #define SETTING_ITEM_NUM   ARRAY_SIZE(setting_item_names)
 
@@ -511,6 +513,25 @@ static void _setting_btn_evt_handler(lv_event_t *e)
 				app_ui_stack_forward(VIB_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);         /* 震动设置 */
 			else if(btn_id == 4)
 				app_ui_stack_forward(POWER_UI, LV_SCR_LOAD_ANIM_ZOOM_IN);       /* 关机 */
+			else if(btn_id == 5) {
+				/* 最小验证：点一下循环切换 15s -> 30s -> 60s */
+				static const uint32_t sleep_steps[] = { 15, 30, 60 };
+				static uint8_t sleep_idx = 2;   /* 初始指向60，第一次点变15 */
+				uint32_t sec;
+
+				sleep_idx = (sleep_idx + 1) % ARRAY_SIZE(sleep_steps);
+				sec = sleep_steps[sleep_idx];
+
+				system_set_auto_sleep_time(sec);
+				SYS_LOG_INF("sleep time set to %u s\n", sec);
+
+				/* 把这一行文字改成“息屏时间 15秒”，让你在屏上能看见生效 */
+				lv_obj_t *lbl = lv_obj_get_child(lv_event_get_current_target(e), 0);
+				if (lbl) {
+					lv_label_set_text_fmt(lbl, "息屏时间 %u秒", sec);
+				}
+			}
+				
 		}
 }
 
