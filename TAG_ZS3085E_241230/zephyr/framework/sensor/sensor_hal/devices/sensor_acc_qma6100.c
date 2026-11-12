@@ -78,11 +78,12 @@ const sensor_cfg_t qma6100_init_cfg[] = {
 	{ 0x10, 1,  {0x05}  }, // NO LPF, ODR = MCLK/512
 	//{ 0x11, 1,  {0x84}  }, // set device into active mode,Freq of MCLK = 51.2K
 
-	{ 0x17, 1,  {0x40}  }, //Enable FIFO watermark interrupt.
+	{ 0x17, 1,  {0x00}  }, // [UART2] 禁用 FIFO watermark 中断，不再拉低 INT1
 
-	{ 0x1a, 1,  {0x40}  }, //map FIFO watermark interrupt to INT1 pin
+	{ 0x1a, 1,  {0x00}  }, // [UART2] 不把中断映射到 INT1 引脚，INT1 停在无效高电平
 
-	{ 0x21, 1,  {0x80}  }, //fifo use latch int
+	{ 0x20, 1,  {0x02}  }, // [UART2] INTPIN_CONF: INT1_OD=1 开漏 + INT1_LVL=0 低有效 -> 无中断时高阻，不占用 GPIO54
+	{ 0x21, 1,  {0x00}  }, // [UART2] INT2 引脚配置清零，避免 INT2 也在动
 
 	{ 0x31, 1,  {0x1}  }, //FIFO watermark = 1 frame 
 
@@ -93,8 +94,10 @@ const sensor_cfg_t qma6100_init_cfg[] = {
 
 const sensor_cfg_t qma6100_on_cfg[] = {
 	{ 0x11, 1,  { 0x84 }  }, // suspend mode enable
-	{ 0x1A, 1,  {0x40}  }, //FIFO watermark interrupt to INT1 
-	{ 0x17, 1,  {0x40}  }, //Enable FIFO watermark interrupt.
+	{ 0x1A, 1,  {0x00}  }, // [UART2] 不映射中断到 INT1
+	{ 0x17, 1,  {0x00}  }, // [UART2] 禁用 FIFO watermark 中断
+	{ 0x20, 1,  {0x02}  }, // [UART2] INTPIN_CONF: INT1_OD=1 开漏 + INT1_LVL=0 低有效 -> 无中断时高阻，不占用 GPIO54
+	{ 0x21, 1,  {0x00}  }, // [UART2] INT2 引脚配置清零
 	{ 0x31, 1,  {0x1}  }, //FIFO watermark = 1 frame 
 	{ REG_NULL }, // end
 };

@@ -65,7 +65,7 @@
 /* ACC Sensor GPIO Config */
 #define CONFIG_SENSOR_ACC_POWER_GPIO        0
 #define CONFIG_SENSOR_ACC_RESET_GPIO        0
-#define CONFIG_SENSOR_ACC_ISR_GPIO          54    /* GPIO54 */
+#define CONFIG_SENSOR_ACC_ISR_GPIO          0     /* was 54, change to 0 to free GPIO54 for UART2 RX (ACC falls back to timer trigger) */
 #define CONFIG_SENSOR_ACC_TRIG_IO           5     /* PPI_triger5 */
 
 /* Heart-rate Sensor GPIO Config */

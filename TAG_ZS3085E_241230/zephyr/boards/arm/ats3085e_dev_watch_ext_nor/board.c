@@ -35,6 +35,18 @@ static const struct acts_pin_config board_pin_config[] = {
     PIN_MFP_SET(GPIO_17,  UART1_MFP_CFG),
 #endif
 
+    /*UART2 */
+#if IS_ENABLED(CONFIG_UART_2)
+    /* uart2 tx: 驱动强度拉到最大档 PADDRV=7。
+     * 实测依据：PADDRV=0 与 PADDRV=4 时，"输出低"只能把线上拉到
+     * 1.37V，因为 4G 模组的 UART_RXD 引脚内部有约 4.7K 上拉顶住；
+     * 同一条件改 PADDRV=7 后能拉到 0.1V，模组才判得出低电平。
+     */
+    PIN_MFP_SET(GPIO_53,  (UART2_MFP_CFG | GPIO_CTL_PADDRV_LEVEL(7))),
+    /* uart2 rx */
+    PIN_MFP_SET(GPIO_54,  UART2_MFP_CFG),
+#endif
+
 #if IS_ENABLED(CONFIG_SPI_FLASH_0)
     /* SPI0 CS */
     PIN_MFP_SET(GPIO_0,   SPINOR_MFP_CFG),
@@ -74,7 +86,7 @@ static const struct acts_pin_config board_pin_config[] = {
 #if IS_ENABLED(CONFIG_I2C_1)
     /* I2C CLK*/
     PIN_MFP_SET(GPIO_51, I2C_MFP_CFG(MFP1_I2C)),
-    /* I2C DATA*/
+    /* I2C DATA*/  
     PIN_MFP_SET(GPIO_52, I2C_MFP_CFG(MFP1_I2C)),
 #endif
 
