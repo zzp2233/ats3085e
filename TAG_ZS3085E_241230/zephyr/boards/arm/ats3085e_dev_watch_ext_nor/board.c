@@ -148,13 +148,14 @@ static const struct acts_pin_config board_pin_config[] = {
 
 #if IS_ENABLED(CONFIG_SPI_2)
     /*SPI SS*/
-    PIN_MFP_SET(GPIO_30,  SPI_MFP_CFG(MFP_SPI2)),
+    PIN_MFP_SET(GPIO_57,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO57 复用为 SPI2 硬件片选输入，避免与电机 PWM 冲突。 */
     /* SPI CLK*/
-    PIN_MFP_SET(GPIO_31,  SPI_MFP_CFG(MFP_SPI2)),
+    PIN_MFP_SET(GPIO_58,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO58 复用为 SPI2 时钟输入，由 503 主机驱动。 */
     /* SPI MISO*/
-    PIN_MFP_SET(GPIO_32,  SPI_MFP_CFG(MFP_SPI2)),
-    /* SPI MOSI*/
-    PIN_MFP_SET(GPIO_33,  SPI_MFP_CFG(MFP_SPI2)),
+    PIN_MFP_SET(GPIO_59,  ((SPI_MFP_CFG(MFP_SPI2) & ~GPIO_CTL_PADDRV_MASK) | GPIO_CTL_PADDRV_LEVEL(3))),    /* GPIO59 复用为 MISO 输出；驱动等级限制在有效的 2 位字段内。 */
+
+    /* SPI MOSI */
+    PIN_MFP_SET(GPIO_60,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO60 复用为 MOSI 输入，接收 503 数据。 */
 #endif
 
 #if IS_ENABLED(CONFIG_SPI_3)
@@ -237,9 +238,8 @@ static const struct acts_pin_config board_i2stx0_config[] = {
 
 #if IS_ENABLED(CONFIG_PWM)
 /* Look at CONFIG_PWM_PIN_CHAN_MAP select the available pwm gpio */
+/* GPIO57 freed: motor disabled, reserved for SPI2_SS */
 static const struct pwm_acts_pin_config board_pwm_config[] = {
-    /* GPIO57 used as pwm channel 1*/
-    PWM_PIN_MFP_SET(GPIO_57, 1, PWM_MFP_CFG),
 };
 #endif
 

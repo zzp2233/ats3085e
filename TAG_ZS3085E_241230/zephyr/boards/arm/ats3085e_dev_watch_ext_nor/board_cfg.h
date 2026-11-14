@@ -76,7 +76,7 @@
 
 #define CONFIG_SPI_1           					0
 #define CONFIG_SPI_1_NAME      				"SPI_1"
-#define CONFIG_SPI_2           					0
+#define CONFIG_SPI_2                            1      /* 启用板级 SPI2 设备实例。 */
 #define CONFIG_SPI_2_NAME      				"SPI_2"
 #define CONFIG_SPI_3           					0
 #define CONFIG_SPI_3_NAME      				"SPI_3"
@@ -138,7 +138,7 @@
 #define CONFIG_ACTS_BATTERY						1
 #define CONFIG_ACTS_BATTERY_DEV_NAME         "batadc"
 
-#define CONFIG_VIBRATOR                         1
+#define CONFIG_VIBRATOR                         0          /* 关闭占用 GPIO57 的振动设备。 */
 #define CONFIG_VIBRATOR_DEV_NAME             "VIBRATOR"
 
 #define CONFIG_CEC				 				0
@@ -193,7 +193,7 @@
 #define CONFIG_SPI_1_RXDMA_CHAN  0xff
 #define CONFIG_SPI_1_DMA_ID    8
 
-#define CONFIG_SPI_2_USE_DMA   1
+#define CONFIG_SPI_2_USE_DMA   0         /* SPI2 从机使用 CPU FIFO 路径，关闭 DMA 收发。 */
 #define CONFIG_SPI_2_TXDMA_CHAN  0xff
 #define CONFIG_SPI_2_RXDMA_CHAN  0xff
 #define CONFIG_SPI_2_DMA_ID    9

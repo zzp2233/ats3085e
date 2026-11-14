@@ -18,6 +18,11 @@
 #include "system_app.h"
 #include <drivers/uart.h>
 #include <drivers/i2c.h>
+#if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)    /* 只为启用 SPI2 从机的固件编译测试命令。 */
+#include <drivers/spi.h>                                     /* Zephyr SPI 配置、缓冲区及传输接口。 */
+#include "spi_link_stress_v6.h"                              /* 两端一致的帧格式、序号和 CRC 工具函数。 */
+#include <sys_wakelock.h>                                    /* 测试期间保持系统唤醒，避免休眠改变引脚状态。 */
+#endif                                                       /* 结束当前条件编译分支。 */
 #include <sensor_hal.h>
 #ifdef CONFIG_PROPERTY
 #include <property_manager.h>
@@ -34,6 +39,190 @@
 #endif
 
 #ifdef CONFIG_SHELL
+#if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)    /* 只为启用 SPI2 从机的固件编译测试命令。 */
+/**
+  * @brief  执行一次旧版固定图案 SPI2 从机收发测试。
+  * @param  sh Shell 实例，用于输出结果。
+  * @param  send_pattern true 发送 B0～BF；false 发送 16 个 00。
+  * @retval 0：收到 A0～AF；负值：设备、传输或数据错误。
+  * @note   仅配合旧版固定图案主机，不与 stress-v6 协议混用。
+  */
+static int spi2test_run(const struct shell *sh, bool send_pattern)
+{
+    static const struct spi_config config = {                                     /* 固定配置对象供同步 SPI 请求使用。 */
+        .frequency = 812500,                                                      /* 请求配置为 812.5 kHz；从机实际移位由外部时钟控制。 */
+        .operation = SPI_OP_MODE_SLAVE | SPI_MODE_CPOL | SPI_MODE_CPHA |          /* 选择从机、CPOL=1、CPHA=1，即 SPI Mode 3。 */
+                     SPI_WORD_SET(8),                                             /* 每个 SPI 数据字为 8 位。 */
+    };
+    const struct device *dev = device_get_binding(CONFIG_SPI_2_NAME);             /* 按板级名称取得 SPI2 设备实例。 */
+    uint8_t tx[16] = {0}, rx[16] = {0};                                           /* 准备 16 字节发送/接收缓冲区；默认发送全零。 */
+    struct spi_buf tx_buf = { .buf = tx, .len = sizeof(tx) };                     /* 描述单块发送缓冲区及其字节数。 */
+    struct spi_buf rx_buf = { .buf = rx, .len = sizeof(rx) };                     /* 描述单块接收缓冲区及其字节数。 */
+    const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };         /* 将发送缓冲区包装成 Zephyr 所需的集合。 */
+    const struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };         /* 将接收缓冲区包装成 Zephyr 所需的集合。 */
+    int ret;                                                                      /* 保存底层传输返回值，非零或负值按调用接口判错。 */
+
+    if (!dev) {                                                                   /* 设备未注册时提前退出，禁止解引用空设备指针。 */
+        shell_error(sh, "SPI_2 is unavailable");                                  /* 告知用户 SPI2 没有绑定到有效设备。 */
+        return -ENODEV;                                                           /* 返回设备不存在错误。 */
+    }
+    if (send_pattern) {                                                           /* 旧版图案测试选择递增字节序列。 */
+        for (size_t i = 0; i < sizeof(tx); i++) {                                 /* 逐字节填充固定长度的测试发送缓冲区。 */
+            tx[i] = 0xb0 + i;                                                     /* 构造 B0、B1、…、BF 的固定图案。 */
+        }
+    }
+
+    shell_print(sh, "SPI2 diag-v2 Mode 3 TX=%s waiting for UMA503 (1 second)",    /* 提示单次测试的发送图案和等待时限。 */
+                send_pattern ? "B0..BF" : "16x00");                               /* 根据参数选择图案说明文本。 */
+    sys_wake_lock(FULL_WAKE_LOCK);                                                /* 锁定完整唤醒状态，覆盖整个测试过程。 */
+    ret = spi_transceive(dev, &config, &tx_set, &rx_set);                         /* 预装从机发送数据，并等待主机时钟完成同步收发。 */
+    sys_wake_unlock(FULL_WAKE_LOCK);                                              /* 成对释放本次测试持有的唤醒锁。 */
+    if (ret < 0) {                                                                /* 底层同步传输失败时不继续按有效帧处理。 */
+        shell_error(sh, "SPI2 transfer failed: %d", ret);                         /* 输出具体驱动错误码，便于区分超时与设备错误。 */
+        return ret;                                                               /* 将底层错误返回调用者。 */
+    }
+
+    shell_hexdump(sh, rx, sizeof(rx));                                            /* 打印完整接收帧，定位字节错位或数据损坏。 */
+    for (size_t i = 0; i < sizeof(rx); i++) {                                     /* 逐字节检查旧版主机发送的固定图案。 */
+        if (rx[i] != 0xa0 + i) {                                                  /* 旧版配套主机应发送 A0～AF。 */
+            shell_error(sh, "SPI2 mismatch at byte %u", (unsigned int)i);         /* 输出第一个不匹配字节的位置。 */
+            return -EIO;                                                          /* 以 I/O 错误表示数据检查失败。 */
+        }
+    }
+    shell_print(sh, "SPI2 PASS: received A0..AF");                                /* 固定图案逐字节核对成功。 */
+    return 0;                                                                     /* 当前函数或检查路径成功完成。 */
+}
+
+/**
+  * @brief  响应 spi2test/spi2test0，发送单帧全零图案。
+  * @param  sh Shell 实例。
+  * @param  argc 参数数量，此命令不读取附加参数。
+  * @param  argv 参数数组，此命令不读取附加参数。
+  * @retval 同 spi2test_run()。
+  */
+static int shell_spi2test0(const struct shell *sh, size_t argc, char *argv[])
+{
+    return spi2test_run(sh, false);                                              /* 复用单次收发函数，选择全零发送图案。 */
+}
+
+/**
+  * @brief  响应 spi2test1，发送单帧 B0～BF 图案。
+  * @param  sh Shell 实例。
+  * @param  argc 参数数量，此命令不读取附加参数。
+  * @param  argv 参数数组，此命令不读取附加参数。
+  * @retval 同 spi2test_run()。
+  */
+static int shell_spi2test1(const struct shell *sh, size_t argc, char *argv[])
+{
+    return spi2test_run(sh, true);                                               /* 复用单次收发函数，选择 B0～BF 图案。 */
+}
+
+/* Bounded shell test: no extra task/stack in this nearly-full SRAM image. */
+/**
+  * @brief  执行有界 SPI2 连续测试并发送最终统计。
+  * @param  sh Shell 实例，测试期间同步占用此 Shell。
+  * @param  argc 1：默认 100 帧；2：读取指定帧数。
+  * @param  argv argv[1] 为十进制帧数，范围 1～1000。
+  * @retval 0：本地接收通过且至少发送一个 END；负值：参数、设备或测试失败。
+  * @note   本地 PASS 只证明 MOSI 接收，必须同时检查 UMA503 的最终 PASS。
+  */
+static int shell_spi2stress(const struct shell *sh, size_t argc, char *argv[])
+{
+    static uint16_t session;                                                                                    /* 跨多次 Shell 命令保留递增会话编号。 */
+    static const struct spi_config config = {                                                                   /* 固定配置对象供同步 SPI 请求使用。 */
+        .frequency = 812500,                                                                                    /* 请求配置为 812.5 kHz；从机实际移位由外部时钟控制。 */
+        .operation = SPI_OP_MODE_SLAVE | SPI_MODE_CPOL | SPI_MODE_CPHA |                                        /* 选择从机、CPOL=1、CPHA=1，即 SPI Mode 3。 */
+                     SPI_WORD_SET(8),                                                                           /* 每个 SPI 数据字为 8 位。 */
+    };
+    const struct device *dev = device_get_binding(CONFIG_SPI_2_NAME);                                           /* 按板级名称取得 SPI2 设备实例。 */
+    unsigned long requested = 100;                                                                              /* 未提供数量参数时默认测试 100 帧。 */
+    char *end;                                                                                                  /* 保存十进制转换结束位置，用于拒绝尾随非法字符。 */
+    uint8_t tx[LINK_FRAME_SIZE], rx[LINK_FRAME_SIZE];                                                           /* 一帧的发送和接收空间，协议固定为 16 字节。 */
+    struct spi_buf tx_buf = { .buf = tx, .len = sizeof(tx) };                                                   /* 描述单块发送缓冲区及其字节数。 */
+    struct spi_buf rx_buf = { .buf = rx, .len = sizeof(rx) };                                                   /* 描述单块接收缓冲区及其字节数。 */
+    const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };                                       /* 将发送缓冲区包装成 Zephyr 所需的集合。 */
+    const struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };                                       /* 将接收缓冲区包装成 Zephyr 所需的集合。 */
+    unsigned int completed = 0, bad = 0, gaps = 0, io_errors = 0, tail_ok = 0;                                  /* 累计完成数、坏帧数、序号缺口、传输错误及 END 成功次数。 */
+    uint16_t previous = 0;                                                                                      /* 记录上一个有效主机帧的序号。 */
+    bool have_previous = false;                                                                                 /* 首帧没有比较基准，首次有效接收后置位。 */
+    int ret = 0;                                                                                                /* 保存底层传输返回值，非零或负值按调用接口判错。 */
+
+    if (argc > 2) {                                                                                             /* 命令最多接受一个可选的帧数参数。 */
+        shell_error(sh, "usage: app spi2stress [1..1000] (default 100)");                                       /* 提示正确命令格式。 */
+        return -EINVAL;                                                                                         /* 参数或缓冲区格式不满足要求，拒绝执行。 */
+    }
+    if (argc == 2) {                                                                                            /* 用户提供了自定义帧数。 */
+        requested = strtoul(argv[1], &end, 10);                                                                 /* 按十进制解析帧数并保留结束指针。 */
+        if (!argv[1][0] || *end || requested < 1 || requested > LINK_MAX_FRAMES) {                              /* 拒绝空串、非法尾字符及超出 1～1000 的数量。 */
+            shell_error(sh, "count must be 1..1000");                                                           /* 告知有效测试帧数范围。 */
+            return -EINVAL;                                                                                     /* 参数或缓冲区格式不满足要求，拒绝执行。 */
+        }
+    }
+    if (!dev) return -ENODEV;                                                                                   /* 设备未注册时提前退出，禁止解引用空设备指针。 */
+    if (++session == 0) ++session;                                                                              /* 递增会话并跳过保留编号 0。 */
+    shell_print(sh, "SPI STRESS v7 start session=%u target=%u; UMA503 must run stress-v6",                      /* 打印本端版本及要求的配套主机协议。 */
+                (unsigned int)session, (unsigned int)requested);                                                /* 输出本轮会话编号和目标帧数。 */
+    sys_wake_lock(FULL_WAKE_LOCK);                                                                              /* 锁定完整唤醒状态，覆盖整个测试过程。 */
+    for (unsigned int i = 0; i < requested; ++i) {                                                              /* 执行用户请求数量的 DATA 传输。 */
+        link_frame(tx, LINK_SLAVE_MAGIC, LINK_DATA, session, (uint16_t)i,                                       /* 构造带本地会话和从机序号的 DATA 帧。 */
+                   (uint16_t)bad, (uint16_t)requested, (uint16_t)gaps);                                         /* 携带截至上一帧的接收错误、目标数量和序号缺口。 */
+        memset(rx, 0xa5, sizeof(rx));                                                                           /* 先填入 A5，便于发现接收缓冲区未被有效写入。 */
+        ret = spi_transceive(dev, &config, &tx_set, &rx_set);                                                   /* 预装从机发送数据，并等待主机时钟完成同步收发。 */
+        if (ret < 0) {                                                                                          /* 底层同步传输失败时不继续按有效帧处理。 */
+            ++io_errors;                                                                                        /* 累计底层传输失败次数。 */
+            shell_error(sh, "SPI STRESS IO_ERROR frame=%u ret=%d", i, ret);                                     /* 记录失败发生的帧号和驱动返回码。 */
+            break;                                                                                              /* 结束当前循环或消息分支，不继续处理后续项。 */
+        }
+        ++completed;                                                                                            /* 仅在底层传输成功后增加完成数量。 */
+        if (link_check(rx, LINK_MASTER_MAGIC) || rx[1] != LINK_DATA ||                                          /* 校验主机帧 CRC、方向、测试数据及 DATA 类型。 */
+            link_u16(rx + 2) || link_u16(rx + 6) ||                                                             /* 主机帧的会话和从机错误字段必须为 0。 */
+            link_u16(rx + 8) || link_u16(rx + 10)) {                                                            /* 主机帧的从机目标数和缺口字段必须为 0。 */
+            ++bad;                                                                                              /* 累计本地接收到的错误帧。 */
+            if (bad <= 3) {                                                                                     /* 限制坏帧详情输出，避免持续错误刷屏。 */
+                shell_error(sh, "SPI STRESS BAD_RX frame=%u", i);                                               /* 指出当前坏帧位置，随后输出原始字节。 */
+                shell_hexdump(sh, rx, sizeof(rx));                                                              /* 打印完整接收帧，定位字节错位或数据损坏。 */
+            }
+        } else {                                                                                                /* 进入另一处理分支。 */
+            uint16_t seq = link_u16(rx + 4);                                                                    /* 读取当前有效帧的 16 位序号。 */
+            if (have_previous) {                                                                                /* 已有有效前帧时才检查序号差值。 */
+                uint16_t delta = (uint16_t)(seq - previous);                                                    /* 按 16 位差值计算，允许主机序号从 FFFF 回绕到 0000。 */
+                if (delta == 0 || delta >= 0x8000u) {                                                           /* 差值为零表示重复；过大的反向差值按倒序处理。 */
+                    ++bad;                                                                                      /* Duplicate or backwards master sequence. */
+                } else if (delta > 1) {                                                                         /* 正向差值大于 1，说明中间未收到部分主机序号。 */
+                    unsigned int total = gaps + delta - 1u;                                                     /* 把本次序号缺口累加到统计值。 */
+                    gaps = total > 65535u ? 65535u : total;                                                     /* 缺口字段只有 16 位，采用饱和计数避免回绕。 */
+                }
+            }
+            previous = seq;                                                                                     /* 保存当前序号作为下一帧比较基准。 */
+            have_previous = true;                                                                               /* 从此以后启用相邻有效帧序号检查。 */
+        }
+        if (completed % 25 == 0) {                                                                              /* 每累计 25 帧打印一次进度。 */
+            shell_print(sh, "SPI STRESS progress %u/%u bad=%u master_gap=%u",                                   /* 输出从机当前完成数量和错误概况。 */
+                        completed, (unsigned int)requested, bad, gaps);                                         /* 输出完成数、目标数、坏帧数及主机序号缺口。 */
+        }
+        k_msleep(2);                                                                                            /* 短暂让出 CPU，随后准备下一帧；主机轮询间隔约 200 ms。 */
+    }
+    /* Send final counters AFTER the last DATA RX has been checked. Repeat
+     * END so a lost final response does not silently look like success. */
+    link_frame(tx, LINK_SLAVE_MAGIC, LINK_END, session, (uint16_t)completed,                                    /* 最后一个 DATA 已校验，构造包含最终计数的 END。 */
+               (uint16_t)(bad + io_errors), (uint16_t)requested, (uint16_t)gaps);                               /* END 同时上报数据错误、传输错误和序号缺口。 */
+    for (unsigned int i = 0; i < 3; ++i) {                                                                      /* 最多重复发送 3 个 END，提高结束汇总被接收的机会。 */
+        ret = spi_transceive(dev, &config, &tx_set, &rx_set);                                                   /* 预装从机发送数据，并等待主机时钟完成同步收发。 */
+        if (ret < 0) break;                                                                                     /* END 底层传输失败后停止重试。 */
+        ++tail_ok;                                                                                              /* 记录已完成的 END 发送次数。 */
+        k_msleep(2);                                                                                            /* 短暂让出 CPU，随后准备下一帧；主机轮询间隔约 200 ms。 */
+    }
+    sys_wake_unlock(FULL_WAKE_LOCK);                                                                            /* 成对释放本次测试持有的唤醒锁。 */
+    shell_print(sh, "SPI STRESS DONE session=%u local=%s good=%u/%u bad=%u master_gap=%u io=%u end_sent=%u",    /* 输出本地最终统计；对端仍需独立给出 PASS。 */
+                (unsigned int)session,                                                                          /* 输出当前会话编号。 */
+                completed == requested && !bad && !gaps && !io_errors && tail_ok ? "PASS" : "FAIL",             /* 全部目标帧完成、各错误为零且 END 发出，才判本地 PASS。 */
+                completed - bad, (unsigned int)requested, bad, gaps, io_errors, tail_ok);                       /* 输出有效帧、目标数和各类错误及结束发送统计。 */
+    /* Local PASS only verifies MOSI. UMA503 DONE also verifies all MISO data. */
+    return completed == requested && !bad && !gaps && !io_errors && tail_ok ? 0 : -EIO;                         /* 将本地测试判定作为 Shell 命令返回值。 */
+}
+
+#endif    /* 结束当前条件编译分支。 */
+
 static int shell_input_key_event(const struct shell *shell, size_t argc, char *argv[])
 {
 	if (argv[1] != NULL) {
@@ -357,9 +546,9 @@ static int shell_at2http(const struct shell *sh, size_t argc, char *argv[])
 	int rxlen;
 	int rc;
 	int i;
-	int http_err = -1;      /* +HTTPGET 第 1 个字段：错误码，0 = 无错误      */
-	int http_code = -1;     /* +HTTPGET 第 2 个字段：HTTP 状态码，200 = 成功 */
-	int http_blen = -1;     /* +HTTPGET 第 3 个字段：服务器声明的正文长度    */
+    int http_err = -1;                                                         /* +HTTPGET 第 1 个字段：错误码，0 = 无错误      */
+    int http_code = -1;                                                        /* +HTTPGET 第 2 个字段：HTTP 状态码，200 = 成功 */
+    int http_blen = -1;                                                        /* +HTTPGET 第 3 个字段：服务器声明的正文长度    */
 
 	if (argc < 2) {
 		shell_print(sh, "usage: app at2http <url>   e.g. app at2http http://www.baidu.com");
@@ -625,13 +814,13 @@ static int shell_at2gex(const struct shell *sh, size_t argc, char *argv[])
 	int rxlen;
 	int rc;
 	int i;
-	int start_pos = 0;      /* 从正文第几字节开始读，默认 0                    */
-	int read_len = 598;     /* 本次要读多少字节，默认填满缓冲                   */
-	int gx_err = 99;        /* +HTTPGETEX 第 1 字段：错误码，0 = 成功           */
-	int gx_code = -1;       /* +HTTPGETEX 第 2 字段：HTTP 状态码                */
-	int gx_len = -1;        /* +HTTPGETEX 第 3 字段：服务器声明总长度            */
-	int rd_len = 0;         /* READ 实际收到多少字节                            */
-	int rd_error = 0;       /* READ 回的是 ERROR 而不是数据                     */
+    int start_pos = 0;                                                        /* 从正文第几字节开始读，默认 0                    */
+    int read_len = 598;                                                       /* 本次要读多少字节，默认填满缓冲                   */
+    int gx_err = 99;                                                          /* +HTTPGETEX 第 1 字段：错误码，0 = 成功           */
+    int gx_code = -1;                                                         /* +HTTPGETEX 第 2 字段：HTTP 状态码                */
+    int gx_len = -1;                                                          /* +HTTPGETEX 第 3 字段：服务器声明总长度            */
+    int rd_len = 0;                                                           /* READ 实际收到多少字节                            */
+    int rd_error = 0;                                                         /* READ 回的是 ERROR 而不是数据                     */
 
 	if (argc < 2) {
 		shell_print(sh, "usage: app at2gex <url> [start] [len]");
@@ -937,24 +1126,24 @@ static int shell_at2get(const struct shell *sh, size_t argc, char *argv[])
 	static unsigned char url[200];
 	static unsigned char rx[600];
 	int url_len = 0;
-	int seg_len = 580;              /* 每段读多少。不能取 598，因为 READ 回来的 */
+    int seg_len = 580;                                                        /* 每段读多少。不能取 598，因为 READ 回来的 */
 	                                /* 数据前面有 "\r\n\r\nCONNECT\r\n" 共 13 字节 */
 	                                /* 应答头，正文上限 = rx[600] - 13 - 余量。     */
 	                                /* 取 580 时回 593 字节，留 7 字节余量。        */
-	int start_pos = 0;              /* 当前段的起始偏移                       */
-	int total = 0;                  /* 已累计吐出的正文字节数                 */
-	int seg_idx = 0;                /* for 循环变量（从 0 开始）              */
-	int done_seg = 0;               /* 真正处理完并吐出数据的段数             */
+    int start_pos = 0;                                                        /* 当前段的起始偏移                       */
+    int total = 0;                                                            /* 已累计吐出的正文字节数                 */
+    int seg_idx = 0;                                                          /* for 循环变量（从 0 开始）              */
+    int done_seg = 0;                                                         /* 真正处理完并吐出数据的段数             */
 	int txlen;
 	int rxlen;
 	int rc;
 	int i;
-	int gx_err = 99;                /* +HTTPGETEX 第 1 字段：错误码，0 = 成功 */
-	int gx_code = -1;               /* +HTTPGETEX 第 2 字段：HTTP 状态码      */
-	int gx_len = -1;                /* +HTTPGETEX 第 3 字段：本段响应体长度    */
-	int body_off = 0;               /* READ 数据里正文的起始偏移              */
-	int body_len = 0;               /* 本段正文实际字节数                     */
-	int rd_error = 0;               /* READ 回的是 ERROR 而不是数据           */
+    int gx_err = 99;                                                          /* +HTTPGETEX 第 1 字段：错误码，0 = 成功 */
+    int gx_code = -1;                                                         /* +HTTPGETEX 第 2 字段：HTTP 状态码      */
+    int gx_len = -1;                                                          /* +HTTPGETEX 第 3 字段：本段响应体长度    */
+    int body_off = 0;                                                         /* READ 数据里正文的起始偏移              */
+    int body_len = 0;                                                         /* 本段正文实际字节数                     */
+    int rd_error = 0;                                                         /* READ 回的是 ERROR 而不是数据           */
 
 	if (argc < 2) {
 		shell_print(sh, "usage: app at2get <url> [seg_len]");
@@ -1302,8 +1491,14 @@ static int shell_at2get(const struct shell *sh, size_t argc, char *argv[])
 	return 0;
 }
 
-#endif /* CONFIG_UART_2 */
+#endif                                                                                                       /* CONFIG_UART_2 */
 SHELL_STATIC_SUBCMD_SET_CREATE(acts_app_cmds,
+#if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)                                                    /* 只为启用 SPI2 从机的固件编译测试命令。 */
+    SHELL_CMD(spi2test, NULL, "send 16 zero bytes (alias of spi2test0)", shell_spi2test0),                   /* 保留旧命令别名，配合固定图案主机使用。 */
+    SHELL_CMD(spi2test0, NULL, "send 16 zero bytes over SPI2", shell_spi2test0),                             /* 注册旧版单帧全零图案命令。 */
+    SHELL_CMD(spi2test1, NULL, "send B0 through BF over SPI2", shell_spi2test1),                             /* 注册旧版单帧 B0～BF 图案命令。 */
+    SHELL_CMD(spi2stress, NULL, "CRC16 continuous test [1..1000], default 100", shell_spi2stress),           /* 注册当前连续 CRC/序号测试命令。 */
+#endif                                                                                                       /* 结束当前条件编译分支。 */
 	SHELL_CMD(set_config, NULL, "set system config", shell_set_config),
 	SHELL_CMD(input, NULL, "input key event", shell_input_key_event),
 #ifdef CONFIG_MONKEY_TEST

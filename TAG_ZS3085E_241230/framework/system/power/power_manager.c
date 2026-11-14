@@ -286,12 +286,25 @@ int power_manager_sync_slave_battery_state(void)
 	return 0;
 }
 
+/**
+  * @brief  执行周期电源管理，在蓝牙初始化后处理待上报电量。
+  * @param  None
+  * @retval 0：正常处理；负值：沿用原电源管理逻辑的错误码。
+  * @note   蓝牙未初始化时保留待上报标记，继续执行唤醒锁及低电检查。
+  */
 static int _power_manager_work_handle(void)
 {
 	if (!power_manager)
 		return -ESRCH;
 
-	if (power_manager->battary_changed) {
+    /* USB card-reader mode can run before bt_manager_init(). Keep the
+     * pending battery update until HFP reporting is available; do not return
+     * early here, since wake locks and low-power checks must still run. */
+    if (power_manager->battary_changed                                                             /* 仅在有未上报的电量变化时准备处理。 */
+#ifdef CONFIG_BT_HFP_HF                                                                            /* 启用 HFP 时才需要检查蓝牙上报前提。 */
+        && bt_manager_is_inited()                                                                  /* 蓝牙初始化前保留待上报标记，不提前发送服务消息。 */
+#endif                                                                                             /* 结束当前条件编译分支。 */
+    ) {                                                                                            /* 满足以上条件后执行本次处理。 */
 		power_manager->battary_changed = 0;
 #ifdef CONFIG_BT_HFP_HF
 	#ifdef CONFIG_TWS

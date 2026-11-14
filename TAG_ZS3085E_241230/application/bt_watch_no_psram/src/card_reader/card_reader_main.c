@@ -11,6 +11,10 @@
 #include <msg_manager.h>
 #include <fw_version.h>
 #include <sys_event.h>
+#include <sys_manager.h>             /* 系统关机接口声明。 */
+#ifndef CONFIG_SIMULATOR             /* 以下电源硬件处理仅在真实设备构建中启用。 */
+#include <drivers/power_supply.h>    /* 电池事件枚举及电源设备接口。 */
+#endif                               /* 结束当前条件编译分支。 */
 #include "app_switch.h"
 #include "app_ui.h"
 #include <hotplug_manager.h>
@@ -188,6 +192,12 @@ int card_reader_deinit(void)
 	return 0;
 }
 
+/**
+  * @brief  检测并运行 USB 读卡模式，处理热插拔和电池通知。
+  * @param  None
+  * @retval 0：普通退出/无需进入；NO_NEED_INIT_BT：无需初始化蓝牙；负值：分配失败。
+  * @note   电压/电量已由电源管理器更新；严重低电执行系统关机。
+  */
 int card_reader_mode_check(void)
 {
 	struct app_msg msg = {0};
@@ -292,6 +302,18 @@ int card_reader_mode_check(void)
 					}
 				}
 				break;
+#ifndef CONFIG_SIMULATOR                                                                            /* 以下电源硬件处理仅在真实设备构建中启用。 */
+            case MSG_BAT_CHARGE_EVENT:                                                              /* 接收电源管理器发给主线程的电池通知。 */
+                /* power_supply_report already updates voltage/capacity.
+                 * This loop runs on main before Bluetooth initialization.
+                 * Consume normal battery notifications and keep the same
+                 * critical-low-battery action as the main message loop.
+                 * USB removal is handled by MSG_HOTPLUG_EVENT above. */
+                if (msg.cmd == BAT_CHG_EVENT_BATTERY_TOO_LOW) {                                     /* 严重低电时采用主消息循环相同的关机策略。 */
+                    system_power_off();                                                             /* 执行系统关机，避免继续低电运行。 */
+                }
+                break;                                                                              /* 结束当前循环或消息分支，不继续处理后续项。 */
+#endif                                                                                              /* 结束当前条件编译分支。 */
 			case MSG_EARLY_SUSPEND_APP:
 			case MSG_LATE_RESUME_APP:
 				break;

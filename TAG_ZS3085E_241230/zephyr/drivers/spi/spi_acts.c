@@ -413,13 +413,35 @@ static int spi_acts_read_data_by_cpu(struct acts_spi_controller *spi,
     return 0;
 }
 
+/**
+  * @brief  使用 CPU FIFO 完成收发，从机在传输前预装 TX。
+  * @param  spi SPI 控制器寄存器基址。
+  * @param  wbuf 至少 len 字节发送数据。
+  * @param  rbuf 至少 len 字节接收空间。
+  * @param  len 本次双向传输字节数。
+  * @retval 0：完成；-ETIMEDOUT：约 1 秒内未完成。
+  * @note   从机依赖外部 CS 和时钟；预装量不超过一个 FIFO。
+  */
 static int spi_acts_write_read_data_by_cpu(struct acts_spi_controller *spi,
         const uint8_t *wbuf, uint8_t *rbuf, int32_t len)
 {
     int rx_len = 0, tx_len = 0;
+    uint32_t preload_before = 0, preload_after = 0;                                                                                      /* 保存预装 FIFO 前后状态，辅助确认发送数据确实入队。 */
+    bool slave = (spi->ctrl & SPI_CTL_MS_SEL_SLAVE) != 0;                                                                                /* 根据控制寄存器识别主机/从机角色。 */
 	uint32_t cycle;
     /* switch to write mode */
     spi->bc = len;
+    /* Prime the slave TX FIFO before enabling the transfer. */
+    if (spi->ctrl & SPI_CTL_MS_SEL_SLAVE) {                                                                                              /* 仅从机需要在响应外部时钟前预装发送 FIFO。 */
+        spi->ctrl &= ~SPI_CTL_WR_MODE_MASK;                                                                                              /* 先关闭读写传输模式，避免预装过程中开始移位。 */
+        preload_before = spi->status;                                                                                                    /* 记录装载前的 FIFO 状态。 */
+        while (tx_len < len && tx_len < SPI_FIFO_LEN &&                                                                                  /* 预装不超过本次长度且不超过一个 FIFO 的数据。 */
+               !(spi->status & SPI_STATUS_TX_FULL)) {                                                                                    /* 只有 TX FIFO 未满才继续写入。 */
+            spi->txdat = *wbuf++;                                                                                                        /* 把当前发送字节写入 TX FIFO，并推进缓冲区指针。 */
+            tx_len++;                                                                                                                    /* 增加实际装载到 TX FIFO 的字节数。 */
+        }
+        preload_after = spi->status;                                                                                                     /* 记录预装后的 FIFO 状态。 */
+    }
     spi->ctrl = (spi->ctrl & ~SPI_CTL_WR_MODE_MASK) | SPI_CTL_WR_MODE_READ_WRITE;
 	cycle = k_cycle_get_32();
     while (rx_len < len || tx_len < len) {
@@ -436,8 +458,12 @@ static int spi_acts_write_read_data_by_cpu(struct acts_spi_controller *spi,
 
 		if(k_cyc_to_ms_ceil32(k_cycle_get_32()-cycle) > 1000){
 			LOG_ERR("spi err: txlen=%d, rxlen=%d, bc=0x%x, ctl=0x%x, status=0x%x\n",tx_len, rx_len, spi->bc, spi->ctrl, spi->status);
-			break;
+            return -ETIMEDOUT;                                                                                                           /* 超时必须返回错误，不能把未完成的传输当作成功。 */
 		}
+    }
+    if (slave) {                                                                                                                         /* 从机测试额外输出预装和完成数量信息。 */
+        LOG_INF("SPI slave diag-v2: pre_sta=0x%x loaded_sta=0x%x tx=%d rx=%d",                                                           /* 输出装载状态和实际收发字节数。 */
+                preload_before, preload_after, tx_len, rx_len);                                                                          /* 打印预装前后状态及 TX/RX 完成数量。 */
     }
     return 0;
 }
@@ -486,6 +512,13 @@ int spi_acts_write_read_data(const struct acts_spi_config *cfg, struct acts_spi_
     return ret;
 }
 
+/**
+  * @brief  传输上下文中的一个数据块并推进缓冲区。
+  * @param  cfg 控制器静态配置，包含 DMA 开关和时钟信息。
+  * @param  data 驱动运行数据及 SPI 上下文。
+  * @retval 0：完成；负值：参数、FIFO、超时或底层传输错误。
+  * @note   SPI2 CPU 从机要求等长非空的双向缓冲区，使用硬件片选。
+  */
 int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_data *data)
 {
     struct acts_spi_controller *spi = cfg->spi;
@@ -497,6 +530,53 @@ int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_da
 
     LOG_DBG("tx_len %d, rx_len %d, chunk_size %d",
         ctx->tx_len, ctx->rx_len, chunk_size);
+
+    if (cfg->clock_id == CLOCK_ID_SPI2 && !cfg->flag_use_dma &&                                           /* 这段专用处理只作用于 SPI2 非 DMA 路径。 */
+        SPI_OP_MODE_GET(ctx->config->operation) == SPI_OP_MODE_SLAVE) {                                   /* 进一步限定为从机模式，其他 SPI 用法走原逻辑。 */
+        /* One equal-length full-duplex transaction using hardware SS. */
+        if (!ctx->tx_buf || !ctx->rx_buf || ctx->tx_len != ctx->rx_len) {                                 /* 要求发送和接收缓冲区有效且长度一致。 */
+            return -EINVAL;                                                                               /* 参数或缓冲区格式不满足要求，拒绝执行。 */
+        }
+
+        spi->status = SPI_STATUS_ERR_MASK;                                                                /* 按状态寄存器规则清除旧错误标志。 */
+        spi->ctrl |= SPI_CTL_RX_FIFO_EN | SPI_CTL_TX_FIFO_EN;                                             /* 开启接收和发送 FIFO。 */
+        ret = spi_acts_write_read_data_by_cpu(spi, ctx->tx_buf, ctx->rx_buf,                              /* 调用带预装处理的 CPU 全双工收发实现。 */
+                                              chunk_size);                                                /* 本次仅处理上下文给出的当前块长度。 */
+        /* RX completion alone does not prove that TX FIFO was consumed.
+         * BUSY and BC remaining count are master-only per the datasheet.
+         */
+        if (!ret) {                                                                                       /* 传输成功后再确认发送 FIFO 已经排空。 */
+            uint32_t start = k_cycle_get_32();                                                            /* 记录等待起点，给 FIFO 排空设置上限。 */
+            while (!(spi->status & SPI_STATUS_TX_EMPTY)) {                                                /* 从机不能以主机专属 BUSY/BC 语义判断完成，检查 TX 空标志。 */
+                if (k_cyc_to_ms_ceil32(k_cycle_get_32() - start) > 10) {                                  /* 发送 FIFO 仍未排空超过 10 ms，按超时退出。 */
+                    ret = -ETIMEDOUT;                                                                     /* 记录 FIFO 排空超时。 */
+                    break;                                                                                /* 结束当前循环或消息分支，不继续处理后续项。 */
+                }
+            }
+        }
+        LOG_INF("SPI2 slave diag-v2: ret=%d ctl=0x%x sta=0x%x bc=0x%x",                                   /* 输出本次驱动结果及控制器状态快照。 */
+                ret, spi->ctrl, spi->status, spi->bc);                                                    /* 打印返回码、控制、状态和字节计数寄存器。 */
+        if (!ret && (spi->status & SPI_STATUS_ERR_MASK)) {                                                /* 即使收发数量达到目标，也不能忽略硬件错误标志。 */
+            ret = -EIO;                                                                                   /* 把硬件错误转换为驱动 I/O 错误。 */
+        }
+
+#if defined(CONFIG_SOC_SERIES_LEOPARD)                                                                    /* 以下 GPIO 寄存器检查只适用于 LEOPARD SoC。 */
+        LOG_INF("SPI2 pins after: 57=%x 58=%x 59=%x 60=%x",                                               /* 打印传输结束后的四个 SPI2 引脚复用状态。 */
+                sys_read32(GPION_CTL(57)), sys_read32(GPION_CTL(58)),                                     /* 读取片选与时钟引脚的配置寄存器。 */
+                sys_read32(GPION_CTL(59)), sys_read32(GPION_CTL(60)));                                    /* 读取 MISO 与 MOSI 引脚的配置寄存器。 */
+#endif                                                                                                    /* 结束当前条件编译分支。 */
+        spi->ctrl &= ~(SPI_CTL_WR_MODE_MASK | SPI_CTL_RX_FIFO_EN |                                        /* 关闭读写模式和接收 FIFO。 */
+                       SPI_CTL_TX_FIFO_EN);                                                               /* 同时关闭发送 FIFO，结束本次从机请求。 */
+        if (ret) {                                                                                        /* 错误路径执行恢复或停止处理。 */
+            /* Discard partial data and force fresh configuration on retry. */
+            acts_reset_peripheral(cfg->reset_id);                                                         /* 复位外设，丢弃残留状态，准备后续重新配置。 */
+            ctx->config = NULL;                                                                           /* 清除上下文配置缓存，确保下次请求重新初始化。 */
+            return ret;                                                                                   /* 将底层错误返回调用者。 */
+        }
+        spi_context_update_tx(ctx, 1, chunk_size);                                                        /* 按字节推进已完成的发送缓冲区位置。 */
+        spi_context_update_rx(ctx, 1, chunk_size);                                                        /* 按字节推进已完成的接收缓冲区位置。 */
+        return 0;                                                                                         /* 当前函数或检查路径成功完成。 */
+    }
 
     spi->ctrl |= SPI_CTL_RX_FIFO_EN | SPI_CTL_TX_FIFO_EN;
 
@@ -617,6 +697,17 @@ int spi_acts_configure(const struct acts_spi_config *cfg,
 
 
 
+/**
+  * @brief  配置 SPI 控制器并执行请求中的所有数据块。
+  * @param  dev SPI 设备实例。
+  * @param  config 本次模式、位宽、频率和片选配置。
+  * @param  tx_bufs 发送缓冲区集合。
+  * @param  rx_bufs 接收缓冲区集合。
+  * @param  asynchronous 是否使用异步上下文通知。
+  * @param  signal 异步请求的完成信号对象。
+  * @retval SPI 上下文完成状态或负错误码。
+  * @note   SPI2 CPU 从机每次请求重建外设状态，避免残留 FIFO。
+  */
 int transceive(const struct device *dev,
               const struct spi_config *config,
               const struct spi_buf_set *tx_bufs,
@@ -635,6 +726,20 @@ int transceive(const struct device *dev,
 
     spi_context_lock(&data->ctx, asynchronous, signal);
 
+#if defined(CONFIG_SOC_SERIES_LEOPARD)                                                /* 以下 GPIO 寄存器检查只适用于 LEOPARD SoC。 */
+    if (cfg->clock_id == CLOCK_ID_SPI2 && !cfg->flag_use_dma &&                       /* 这段专用处理只作用于 SPI2 非 DMA 路径。 */
+        SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE) {                    /* 进一步限定为从机模式，其他 SPI 用法走原逻辑。 */
+        /* Diagnostic recovery: rebuild peripheral state on every request.
+         * Observe pin mux without overwriting another owner's configuration.
+         */
+        LOG_INF("SPI2 diag-v2 before: ctl=0x%x sta=0x%x", spi->ctrl, spi->status);    /* 保存复位前的控制器快照，辅助排查残留状态。 */
+        LOG_INF("SPI2 pins before: 57=%x 58=%x 59=%x 60=%x",                          /* 记录复位前四个 SPI2 引脚的复用设置。 */
+                sys_read32(GPION_CTL(57)), sys_read32(GPION_CTL(58)),                 /* 读取片选与时钟引脚的配置寄存器。 */
+                sys_read32(GPION_CTL(59)), sys_read32(GPION_CTL(60)));                /* 读取 MISO 与 MOSI 引脚的配置寄存器。 */
+        acts_reset_peripheral(cfg->reset_id);                                         /* 复位外设，丢弃残留状态，准备后续重新配置。 */
+        data->ctx.config = NULL;                                                      /* 取消配置缓存，强制本次请求按当前参数配置。 */
+    }
+#endif                                                                                /* 结束当前条件编译分支。 */
     /* Configure */
     ret = spi_acts_configure(cfg, data, config);
     if (ret) {
@@ -702,7 +807,6 @@ static int spi_acts_release(const struct device *dev,
     return 0;
 }
 
-#define SPI_TEST
 #ifdef SPI_TEST
 static int spi_test(const struct device *dev)
 {

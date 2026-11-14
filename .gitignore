@@ -16,4 +16,12 @@ logs/
 Thumbs.db
 desktop.ini
 
+# SPI 调试历史产物与本机发布目录（不屏蔽厂商 SDK 的固件和库）
+/artifacts/
+/ats3085e_spi_*.fw
+__pycache__/
+*.py[cod]
+*.before_*
+*.bak_nomotor
+
 # ---- 注：.elf / .bin / .a / .lib / .FW 均为 SDK 预编译工具或库，务必入库，不要忽略 ----

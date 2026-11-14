@@ -16,10 +16,25 @@
 
 static uint8_t current_level = 0;
 
+/**
+  * @brief  启动振动；设备禁用或未注册时直接返回。
+  * @param  None
+  * @retval 无。
+  */
 static void vibration_start(void);
+/**
+  * @brief  停止振动；设备禁用或未注册时直接返回。
+  * @param  None
+  * @retval 无。
+  */
 static void vibration_stop(void);
 static void vibration_set_level(uint8_t level);
 static uint8_t vibration_get_level(void);
+/**
+  * @brief  设置振动频率；设备不存在时直接返回。
+  * @param  freq 传递给振动驱动的频率参数。
+  * @retval 无。
+  */
 static void vibration_set_freq(uint32_t freq);
 
 static uint8_t vib_strength[LEVEL_NUM] = {
@@ -40,6 +55,9 @@ static void vibration_start(void)
 {
 #ifndef CONFIG_SIMULATOR
 	const struct device *dev = device_get_binding(CONFIG_VIBRATOR_DEV_NAME);
+    if (!dev) {                                                                 /* 设备未注册时提前退出，禁止解引用空设备指针。 */
+        return;                                                                 /* 当前路径无需后续操作，返回调用者。 */
+	}
 	vibrat_start(dev, PWM_CHAN, vib_strength[current_level]);
 #endif
 	return;
@@ -49,6 +67,9 @@ static void vibration_stop(void)
 {
 #ifndef CONFIG_SIMULATOR
 	const struct device *dev = device_get_binding(CONFIG_VIBRATOR_DEV_NAME);
+    if (!dev) {                                                                 /* 设备未注册时提前退出，禁止解引用空设备指针。 */
+        return;                                                                 /* 当前路径无需后续操作，返回调用者。 */
+	}
 	vibrat_stop(dev, PWM_CHAN);
 #endif
 	return;
@@ -73,6 +94,9 @@ static void vibration_set_freq(unsigned int freq)
 {
 #ifndef CONFIG_SIMULATOR
 	const struct device *dev = device_get_binding(CONFIG_VIBRATOR_DEV_NAME);
+    if (!dev) {                                                                 /* 设备未注册时提前退出，禁止解引用空设备指针。 */
+        return;                                                                 /* 当前路径无需后续操作，返回调用者。 */
+	}
 	vibrat_set_freq_param(dev, PWM_CHAN, freq);
 #endif
 	return;

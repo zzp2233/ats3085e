@@ -18,7 +18,8 @@
   "vscode-serial-monitor.lineEnding": "\n",
 
   // 板端固件关闭了 printk 自带时间戳，这里由 VSCode 补上，方便定位时序
-  "vscode-serial-monitor.timestampFormat": "HH:mm:ss.SSS",
+  // 插件使用 strftime 占位符：%H 时、%M 分、%S 秒、%L 毫秒
+  "vscode-serial-monitor.timestampFormat": "%H:%M:%S.%L",
   "vscode-serial-monitor.timestampSeparator": " | ",
 
   // 串口内容可一键保存到该目录，方便事后复盘
