@@ -222,8 +222,16 @@ def pad_file(filename, align = 4, fillbyte = 0xff):
                 f.write(bytearray([fillbyte]*padsize))
 
 def new_file(filename, filesize, fillbyte = 0xff):
+        # 分块写入：原实现先构造 filesize 长度的列表再转 bytearray，32 MB 镜像要
+        # 约 300 MB 连续提交空间，提交内存紧张时直接抛 MemoryError。
+        # 改成按 1 MB 块写入后峰值只占几 MB，镜像内容与原来逐字节一致。
+        chunk = bytes([fillbyte]) * 0x100000
+        remaining = filesize
         with open(filename, 'wb') as f:
-            f.write(bytearray([fillbyte]*filesize))
+            while remaining > 0:
+                n = 0x100000 if remaining > 0x100000 else remaining
+                f.write(chunk if n == 0x100000 else chunk[:n])
+                remaining -= n
 
 def dd_file(input_file, output_file, count=None, seek=None, skip=None):
     inf = open(input_file, mode='rb')

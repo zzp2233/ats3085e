@@ -150,15 +150,15 @@ static const struct acts_pin_config board_pin_config[] = {
 #endif
 
 #if IS_ENABLED(CONFIG_SPI_2)
-    /* SPI 片选。 */
-    PIN_MFP_SET(GPIO_57,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO57 复用为 SPI2 硬件片选输入，避免与电机 PWM 冲突。 */
-    /* SPI 时钟。 */
-    PIN_MFP_SET(GPIO_58,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO58 复用为 SPI2 时钟输入，由 503 主机驱动。 */
-    /* SPI 从机输出/主机输入。 */
-    PIN_MFP_SET(GPIO_59,  ((SPI_MFP_CFG(MFP_SPI2) & ~GPIO_CTL_PADDRV_MASK) | GPIO_CTL_PADDRV_LEVEL(3))),    /* GPIO59 复用为 MISO 输出；先清除原驱动强度字段，再设置为等级 3。 */
+    /* SPI 片选（主机侧）。 */
+    PIN_MFP_SET(GPIO_57,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO57 复用为 SPI2 片选，释放自原电机 PWM，避免与振动设备冲突。 */
+    /* SPI 时钟（主机输出）。 */
+    PIN_MFP_SET(GPIO_58,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO58 复用为 SPI2 SCLK，由本机主机产生时钟。 */
+    /* SPI 主机输入（从机→主机）。 */
+    PIN_MFP_SET(GPIO_59,  ((SPI_MFP_CFG(MFP_SPI2) & ~GPIO_CTL_PADDRV_MASK) | GPIO_CTL_PADDRV_LEVEL(3))),    /* GPIO59 复用为 MISO 输入；先清除原驱动强度字段，再设置为等级 3。 */
 
-    /* SPI 主机输出/从机输入。 */
-    PIN_MFP_SET(GPIO_60,  SPI_MFP_CFG(MFP_SPI2)),    /* GPIO60 复用为 MOSI 输入，接收 503 数据。 */
+    /* SPI 主机输出（主机→从机）。 */
+    PIN_MFP_SET(GPIO_60,  SPI_MFP_CFG(MFP_SPI2)),    /* GPIO60 复用为 MOSI 输出，向 503 从机发送数据。 */
 #endif
 
 #if IS_ENABLED(CONFIG_SPI_3)

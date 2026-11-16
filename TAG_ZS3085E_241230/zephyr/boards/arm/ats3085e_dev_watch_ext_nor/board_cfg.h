@@ -1,4 +1,4 @@
-/* 板级静态配置：此文件的CONFIG宏选择设备实例、名称、DMA资源及引脚相关参数；不同于运行时spi_config。SPI2当前启用CPU轮询，从机SCK由UMA主机输出，振动设备关闭以释放GPIO57。头文件保护避免与dev_config.h相互包含时重复展开。 */
+/* 板级静态配置：此文件的CONFIG宏选择设备实例、名称、DMA资源及引脚相关参数；不同于运行时spi_config。SPI2当前启用CPU轮询，本机作主机产生SCLK，振动设备关闭以释放GPIO57。头文件保护避免与dev_config.h相互包含时重复展开。 */
 /*
  * Copyright (c) 2015 Intel Corporation
  *

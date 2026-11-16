@@ -19,6 +19,12 @@
 #include "system_app.h"
 #include <drivers/uart.h>
 #include <drivers/i2c.h>
+#if IS_ENABLED(CONFIG_SPI_2)
+#include <drivers/spi.h>
+#include "spi_link_swap.h"    /* 新主机测试使用独立的延迟确认协议。 */
+#include <drivers/spi_acts_entry.h>    /* 独立于从机测试编译开关的主机入口检查。 */
+#include <sys_wakelock.h>             /* 检查期间禁止休眠覆盖 SPI2 引脚复用。 */
+#endif
 #if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)    /* 只为启用 SPI2 从机的固件编译测试命令。 */
 #include <drivers/spi.h>                                     /* Zephyr SPI 配置、缓冲区及传输接口。 */
 #include "spi_link_stress_v6.h"                              /* 两端一致的帧格式、序号和 CRC 工具函数。 */
@@ -40,6 +46,171 @@
 #endif
 
 #ifdef CONFIG_SHELL
+
+#if IS_ENABLED(CONFIG_SPI_2)
+static uint8_t s_swap_tx[SWAP_SIZE];    /* 主机发送帧缓冲；v3 一帧 256 字节，放静态区。 */
+static uint8_t s_swap_rx[SWAP_SIZE];    /* 主机接收帧缓冲。 */
+/**
+  * @brief  作为主机执行有界的整帧双向测试，最后额外发一帧取回末帧确认。
+  * @param  sh：[输入]有效 Shell 对象，不可为空。
+  * @param  argc：[输入]命令参数数量，允许 0～3 个可选参数。
+  * @param  argv：[输入]Shell 字符串数组，依次为帧数 1～1000、帧间隔毫秒 0～1000、时钟 100000～26000000。
+  * @retval 0：所有请求均收到正确确认；-EINVAL：参数错误；-ENODEV：设备不存在；-EIO：校验失败；其他负值来自驱动。
+  * @note   先启动 503 并看到 SLAVE SWAP pre=len 再发命令，否则首帧会打在不存在的从机上。
+  *         占用 Shell 线程并持唤醒锁；单帧失败即停，v3 从机会自恢复，但本轮已中断。
+  */
+static int shell_spi2swap(const struct shell *sh, size_t argc, char *argv[])
+{
+    static uint16_t sid;    /* 每次命令产生新的非零会话号，拒绝上一轮残留确认。 */
+    /* 频率改为每次调用可覆盖，便于在同一次烧录里扫不同时钟，不必反复重编。 */
+    struct spi_config config = {
+        .frequency = 812500,    /* 缺省沿用当前驱动实际分频约 800 kHz 的档位。 */
+        .operation = SPI_OP_MODE_MASTER | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8),
+    };
+    const struct device *dev;    /* 注册的 SPI2 实例。 */
+    uint8_t *tx = s_swap_tx;    /* 256 字节缓冲放静态区，避免压在本就紧张的 shell 线程栈上。 */
+    uint8_t *rx = s_swap_rx;    /* 接收缓冲同理。 */
+    struct spi_buf tb = { .buf = tx, .len = SWAP_SIZE };    /* 整帧长度直接用宏：tx 已是指针，不能再取 sizeof。 */
+    struct spi_buf rb = { .buf = rx, .len = SWAP_SIZE };    /* 收发等长，满足驱动的主机等长分支要求。 */
+    const struct spi_buf_set ts = { .buffers = &tb, .count = 1 };
+    const struct spi_buf_set rs = { .buffers = &rb, .count = 1 };
+    unsigned long count = 1;    /* 默认仅确认一个有效请求。 */
+    unsigned long gap_ms = SWAP_GAP_MS;    /* 缺省间隔，可用第三个参数覆盖。 */
+    unsigned long freq = 812500;    /* 缺省时钟，可用第四个参数覆盖。 */
+    unsigned int i, good = 0;    /* good 只统计收到对应确认的请求。 */
+    char *end;    /* 检查数值转换是否完整。 */
+    int ret = 0;    /* 首个故障决定整轮结果。 */
+
+    /* 参数检查必须先于硬件配置，不能因错误参数产生时钟。 */
+    if (argc > 4) return -EINVAL;
+    if (argc >= 2) {
+        count = strtoul(argv[1], &end, 10);
+        if (!argv[1][0] || *end || count < 1 || count > 1000) return -EINVAL;
+    }
+    if (argc >= 3) {
+        gap_ms = strtoul(argv[2], &end, 10);
+        if (!argv[2][0] || *end || gap_ms > 1000) return -EINVAL;
+    }
+    if (argc >= 4) {
+        freq = strtoul(argv[3], &end, 10);
+        if (!argv[3][0] || *end || freq < 100000 || freq > 26000000) return -EINVAL;
+        config.frequency = (uint32_t)freq;    /* 允许的档位由驱动分频表实际决定，日志会打印真实速率。 */
+    }
+    dev = device_get_binding(CONFIG_SPI_2_NAME);
+    if (!dev) return -ENODEV;
+    if (++sid == 0) ++sid;
+    shell_print(sh, "SPI SWAP start sid=%u count=%u gap_ms=%u freq=%u", sid,
+                (unsigned int)count, (unsigned int)gap_ms, (unsigned int)config.frequency);
+
+    /* 延迟确认流水：第 0 帧同步；第 1～count 帧分别验证前一请求。 */
+    sys_wake_lock(FULL_WAKE_LOCK);
+    k_msleep(gap_ms);
+    {
+    uint32_t t_all0 = k_uptime_get_32();      /* 整条命令的起点，用来算平均单帧耗时。 */
+    static uint8_t s_exp[SWAP_SIZE];          /* v10：按协议自行复算出的"从机应回帧"，用于逐字节定位坏点。 */
+    unsigned int retries = 0;                 /* v10：整轮累计重发次数，这才是真实的底层随机失败率。 */
+    for (i = 0; i <= count; ++i) {
+        uint32_t t_x0 = k_uptime_get_32();    /* 本帧开始时刻（ms），用来量出 256 字节真正占多长墙上时间。 */
+        unsigned int tries = 0u;              /* 本帧已经重发过几次。 */
+        int frame_ok = 0;                     /* 本帧最终是否拿到有效确认。 */
+        for (;;) {
+            int chk;
+            swap_frame(tx, SWAP_MASTER, sid, (uint16_t)i);
+            memset(rx, 0xa5, SWAP_SIZE);    /* 用宏而不是 sizeof(rx)：rx 是指针。 */
+            ret = spi_transceive(dev, &config, &ts, &rs);
+            /* 这一行是判"到底谁慢"的唯一硬数据：从机侧帧窗有 35 ms，若这里只有 3 ms，
+             * 说明从机在传完之后还在空转；若这里就是十几毫秒，说明瓶颈在主机驱动，
+             * 从机的 CPU 抢不到根本不是主因。只打前 3 帧，避免灌爆串口。 */
+            if (tries == 0u && i < 3u) {
+                shell_print(sh, "SPI SWAP xfer=%u ms at transfer=%u", (unsigned int)(k_uptime_get_32() - t_x0), i);
+            }
+            if (ret < 0) break;             /* 驱动层报错，整轮立即终止。 */
+            chk = swap_check(rx, SWAP_SLAVE);
+            if (chk == 0 && (!i || (swap_u16(rx + 2) == sid && swap_u16(rx + 4) == (uint16_t)(i - 1)))) {
+                frame_ok = 1;               /* 整帧 CRC、头部 CRC、图案、会话与序号全部对上。 */
+                break;
+            }
+            /* 第 0 帧天然不合格：从机必须在收到请求之前就预装 TX，只能拿开机时的默认
+             * sid=0/seq=FFFF 顶上，首帧回包必然是"旧头 + 新身"混合，CRC 不可能对上。
+             * 协议本来就把它当同步帧（后续帧才逐帧确认 seq=i-1），所以这里静默跳过、不重发。 */
+            if (i == 0u) break;
+            /* v10：把收到的帧和"按协议应回的帧"逐字节比对。第一个不同处就是坏字节的位置：
+             * first >= 254   -> 尾部被截，最后一个字节没赶上时钟；
+             * first 在 14..253 且 ndiff 很小 -> 帧中某个字节被破坏，属于中途穿底；
+             * ndiff = 256    -> 整帧对不上，根本没同步上。 */
+            {
+                unsigned int d, ndiff = 0u, first = SWAP_SIZE;
+                swap_frame(s_exp, SWAP_SLAVE, sid, (uint16_t)(i - 1));
+                for (d = 0u; d < SWAP_SIZE; ++d) {
+                    if (rx[d] != s_exp[d]) {
+                        if (ndiff == 0u) first = d;
+                        ++ndiff;
+                    }
+                }
+                shell_error(sh, "SPI SWAP bad at transfer=%u chk=%d ndiff=%u/%u first=%u", i, chk, ndiff, SWAP_SIZE, first);
+                shell_hexdump(sh, rx + SWAP_SIZE - 16u, 16);    /* 尾部 16 字节，看是不是被截或变 0x00。 */
+                shell_hexdump(sh, s_exp + SWAP_SIZE - 16u, 16);  /* 同一位置的应有内容，直接对照。 */
+            }
+            /* 同一序号重发：从机对任何一个请求都无状态应答，重发不需要它做任何配合。
+             * 留 2 次余量，既不掩盖问题（次数会打印出来），又让长压测能跑完并量出失败率。 */
+            if (tries >= 2u) {
+                shell_error(sh, "SPI SWAP invalid reply at transfer=%u after %u retries", i, tries);
+                ret = -EIO;
+                break;
+            }
+            ++tries;
+            ++retries;
+            k_msleep(gap_ms);
+        }
+        if (ret < 0) break;
+        if (i == 0u) {
+            if (i < count) k_msleep(gap_ms);
+            continue;
+        }
+        if (!frame_ok) { ret = -EIO; break; }
+        ++good;
+        if (i < count) k_msleep(gap_ms);
+    }
+    /* 整条命令的实测总耗时：除以帧数即为单帧墙上时间，用来反推真实 SCLK。 */
+    shell_print(sh, "SPI SWAP total=%u ms frames=%u retries=%u", (unsigned int)(k_uptime_get_32() - t_all0),
+                (unsigned int)(count + 1u), retries);
+    }
+
+    /* 保留最后一帧的重新武装时间，便于随后再次执行命令。 */
+    k_msleep(gap_ms);
+    sys_wake_unlock(FULL_WAKE_LOCK);
+    shell_print(sh, "SPI SWAP %s sid=%u good=%u/%u ret=%d", ret ? "FAIL" : "PASS",
+                sid, good, (unsigned int)count, ret);
+    return ret;
+}
+
+/**
+  * @brief  手动检查 SPI2 主机空闲配置，不产生数据事务。
+  * @param  sh：[输入]有效 Shell 对象，用于输出诊断结果，不可为空。
+  * @param  argc：[输入]命令参数数量，仅接受命令本身。
+  * @param  argv：[输入]Shell 参数数组，本函数不读取其内容。
+  * @retval 0：配置回读通过；-EINVAL：参数多余；-ENODEV：设备未绑定；其他负值来自驱动检查。
+  * @note   先烧录并启动 UMA503 从机检查固件再执行；无需 READY，不证明收发成功。
+  */
+static int shell_spi2entry(const struct shell *sh, size_t argc, char *argv[])
+{
+    const struct device *dev;    /* 保存系统注册的 SPI2 设备，不创建新设备。 */
+    int ret;                     /* 保存配置检查结果。 */
+
+    /* 本命令不接受数据或循环次数，避免误认为连续传输入口。 */
+    ARG_UNUSED(argv);
+    if (argc != 1) return -EINVAL;
+    dev = device_get_binding(CONFIG_SPI_2_NAME);
+    if (!dev) return -ENODEV;
+
+    /* 唤醒锁覆盖寄存器配置与诊断，结束后仍恢复原电源管理策略。 */
+    sys_wake_lock(FULL_WAKE_LOCK);
+    ret = spi_acts_spi2_entry_check(dev);
+    sys_wake_unlock(FULL_WAKE_LOCK);
+    shell_print(sh, "SPI2 ENTRY ret=%d; configuration only, no transfer", ret);
+    return ret;
+}
+#endif
 #if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)    /* 只为启用 SPI2 从机的固件编译测试命令。 */
 
 /**
@@ -1627,6 +1798,10 @@ static int shell_at2get(const struct shell *sh, size_t argc, char *argv[])
 
 #endif                                                                                                           /* CONFIG_UART_2 */
 SHELL_STATIC_SUBCMD_SET_CREATE(acts_app_cmds,                                                                    /* 创建静态子命令表，SPI、UART及其他诊断共用app根入口。 */
+#if IS_ENABLED(CONFIG_SPI_2)
+    SHELL_CMD(spi2swap, NULL, "master CRC test [1..1000], default 1; UMA slave required", shell_spi2swap),    /* 有界双向测试。 */
+    SHELL_CMD(spi2entry, NULL, "master idle check; UMA must be slave first", shell_spi2entry),    /* 不发数据的主机入口检查。 */
+#endif
 #if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)                                                        /* 只为启用 SPI2 从机的固件编译测试命令。 */
     SHELL_CMD(spi2test, NULL, "send 16 zero bytes (alias of spi2test0)", shell_spi2test0),                       /* 保留旧命令别名，配合固定图案主机使用。 */
     SHELL_CMD(spi2test0, NULL, "send 16 zero bytes over SPI2", shell_spi2test0),                                 /* 注册旧版单帧全零图案命令。 */
