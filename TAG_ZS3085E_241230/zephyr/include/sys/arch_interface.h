@@ -5,28 +5,16 @@
  */
 
 /**
- * @defgroup arch-interface Architecture Interface
- * @brief Internal kernel APIs with public scope
- *
- * Any public kernel APIs that are implemented as inline functions and need to
- * call architecture-specific API so will have the prototypes for the
- * architecture-specific APIs here. Architecture APIs that aren't used in this
- * way go in kernel/include/kernel_arch_interface.h.
- *
- * The set of architecture-specific APIs used internally by public macros and
- * inline functions in public headers are also specified and documented.
- *
- * For all macros and inline function prototypes described herein, <arch/cpu.h>
- * must eventually pull in full definitions for all of them (the actual macro
- * defines and inline function bodies)
- *
- * include/kernel.h and other public headers depend on definitions in this
- * header.
+ * @defgroup arch-interface 架构接口
+ * @brief 供公共内核头内部使用的架构接口合同。
+ * 公共宏及内联函数需要的架构原型在此声明；其他内核私有接口在 kernel_arch_interface.h。
+ * arch/cpu.h 最终须引入这些宏和内联函数的完整定义。此文件包含多架构能力合同，不能把全部分支视为当前 ATS 目标已启用。
  */
 #ifndef ZEPHYR_INCLUDE_SYS_ARCH_INTERFACE_H_
 #define ZEPHYR_INCLUDE_SYS_ARCH_INTERFACE_H_
 
 #ifndef _ASMLANGUAGE
+/* 非汇编编译时引入编译器属性、定宽类型、当前架构实现和中断测试回调类型。 */
 #include <toolchain.h>
 #include <stddef.h>
 #include <zephyr/types.h>
@@ -37,25 +25,28 @@
 extern "C" {
 #endif
 
-/* NOTE: We cannot pull in kernel.h here, need some forward declarations  */
+/* 为避免循环依赖，不在此包含 kernel.h；只前置声明所需结构体。 */
 struct k_thread;
 struct k_mem_domain;
 
+/* 栈元素的公共类型别名；真实元素布局和对齐由架构定义，不能将栈字节数和元素数混用。 */
 typedef struct z_thread_stack_element k_thread_stack_t;
 
+/* 线程入口回调类型的实际 typedef：由调度器以 p1/p2/p3 三个输入指针调用，各参数可否为空及数据寿命由具体入口约定；无返回值，入口返回后线程结束。 */
 typedef void (*k_thread_entry_t)(void *p1, void *p2, void *p3);
 
 /**
- * @defgroup arch-timing Architecture timing APIs
+ * @defgroup arch-timing 架构计时接口
  * @ingroup arch-interface
  * @{
  */
 
 /**
- * Obtain the current cycle count, in units that are hardware-specific
- *
- * @see k_cycle_get_32()
- */
+  * @brief  取得架构提供的 32 位硬件周期计数。
+  * @param  无。
+  * @retval 当前周期值，溢出按 32 位无符号数回绕。
+  * @note   当前 Actions 目标由系统定时器接口提供；频率依据构建配置，不能直接当作毫秒。
+  */
 static inline uint32_t arch_k_cycle_get_32(void);
 
 /** @} */
@@ -68,69 +59,32 @@ static inline uint32_t arch_k_cycle_get_32(void);
 
 /**
  * @def ARCH_THREAD_STACK_RESERVED
- *
- * @see K_THREAD_STACK_RESERVED
+ * 线程栈对象中为架构私有数据保留的容量，公共层通过 K_THREAD_STACK_RESERVED 使用。
  */
 
 /**
  * @def ARCH_STACK_PTR_ALIGN
- *
- * Required alignment of the CPU's stack pointer register value, dictated by
- * hardware constraints and the ABI calling convention.
- *
- * @see Z_STACK_PTR_ALIGN
+ * CPU 栈指针必须满足的字节对齐，同时受硬件和 ABI 调用规范约束。
  */
 
 /**
  * @def ARCH_THREAD_STACK_OBJ_ALIGN(size)
- *
- * Required alignment of the lowest address of a stack object.
- *
- * Optional definition.
- *
- * @see Z_THREAD_STACK_OBJ_ALIGN
+ * 可选的线程栈对象最低地址对齐规则，参数 size 为栈容量。
  */
 
 /**
  * @def ARCH_THREAD_STACK_SIZE_ADJUST(size)
- * @brief Round up a stack buffer size to alignment constraints
- *
- * Adjust a requested stack buffer size to the true size of its underlying
- * buffer, defined as the area usable for thread stack context and thread-
- * local storage.
- *
- * The size value passed here does not include storage reserved for platform
- * data.
- *
- * The returned value is either the same size provided (if already properly
- * aligned), or rounded up to satisfy alignment constraints.  Calculations
- * performed here *must* be idempotent.
- *
- * Optional definition. If undefined, stack buffer sizes are either:
- * - Rounded up to the next power of two if user mode is enabled on an arch
- *   with an MPU that requires such alignment
- * - Rounded up to ARCH_STACK_PTR_ALIGN
- *
- * @see Z_THREAD_STACK_SIZE_ADJUST
+ * 可选的可用栈容量向上调整规则，包含线程上下文和 TLS，不包含平台保留区域；重复调整必须得到同样结果。未定义时按 MPU 的二次幂约束或栈指针对齐规则处理。
  */
 
 /**
  * @def ARCH_KERNEL_STACK_RESERVED
- * @brief MPU guard size for kernel-only stacks
- *
- * If MPU stack guards are used to catch stack overflows, specify the
- * amount of space reserved in kernel stack objects. If guard sizes are
- * context dependent, this should be in the minimum guard size, with
- * remaining space carved out if needed.
- *
- * Optional definition, defaults to 0.
- *
- * @see K_KERNEL_STACK_RESERVED
+ * 内核专用栈为 MPU 溢出保护保留的字节数；可选，缺省为 0，若保护大小依上下文变化，此值取最小保留量，其余按需划出。
  */
 
 /**
  * @def ARCH_KERNEL_STACK_OBJ_ALIGN
- * @brief Required alignment of the lowest address of a kernel-only stack.
+ * 内核专用栈对象最低地址的对齐要求。
  */
 
 /** @} */
@@ -141,42 +95,19 @@ static inline uint32_t arch_k_cycle_get_32(void);
  */
 
 /**
- * @brief Power save idle routine
- *
- * This function will be called by the kernel idle loop or possibly within
- * an implementation of z_pm_save_idle in the kernel when the
- * '_pm_save_flag' variable is non-zero.
- *
- * Architectures that do not implement power management instructions may
- * immediately return, otherwise a power-saving instruction should be
- * issued to wait for an interrupt.
- *
- * @note The function is expected to return after the interrupt that has
- * caused the CPU to exit power-saving mode has been serviced, although
- * this is not a firm requirement.
- *
- * @see k_cpu_idle()
- */
+  * @brief  在当前 CPU 上进入架构支持的省电空闲状态。
+  * @param  无。
+  * @retval 无。
+  * @note   由内核空闲流程调用；没有省电指令的架构可以直接返回。通常在唤醒中断处理后返回，但接口不作硬性保证。
+  */
 void arch_cpu_idle(void);
 
 /**
- * @brief Atomically re-enable interrupts and enter low power mode
- *
- * The requirements for arch_cpu_atomic_idle() are as follows:
- *
- * -# Enabling interrupts and entering a low-power mode needs to be
- *    atomic, i.e. there should be no period of time where interrupts are
- *    enabled before the processor enters a low-power mode.  See the comments
- *    in k_lifo_get(), for example, of the race condition that
- *    occurs if this requirement is not met.
- *
- * -# After waking up from the low-power mode, the interrupt lockout state
- *    must be restored as indicated in the 'key' input parameter.
- *
- * @see k_cpu_atomic_idle()
- *
- * @param key Lockout key returned by previous invocation of arch_irq_lock()
- */
+  * @brief  原子地允许中断并进入省电等待，避免检查条件到睡眠之间丢失唤醒。
+  * @param  key：[输入]先前 arch_irq_lock 返回的中断状态键。
+  * @retval 无。
+  * @note   允许中断与进入低功耗必须构成不可丢失唤醒的操作；醒来后按 key 恢复原锁定状态。
+  */
 void arch_cpu_atomic_idle(unsigned int key);
 
 /** @} */
@@ -188,40 +119,32 @@ void arch_cpu_atomic_idle(unsigned int key);
  */
 
 /**
- * Per-cpu entry function
- *
- * @param data context parameter, implementation specific
- */
+  * @brief  其他 CPU 启动完成后的入口回调。
+  * @param  data：[输入]架构启动流程传入的上下文，可为空，语义由调用方定义。
+  * @retval 不返回。
+  * @note   由 arch_start_cpu 使用，不是普通可返回的任务函数。
+  */
 typedef FUNC_NORETURN void (*arch_cpustart_t)(void *data);
 
 /**
- * @brief Start a numbered CPU on a MP-capable system
- *
- * This starts and initializes a specific CPU.  The main thread on startup is
- * running on CPU zero, other processors are numbered sequentially.  On return
- * from this function, the CPU is known to have begun operating and will enter
- * the provided function.  Its interrupts will be initialized but disabled such
- * that irq_unlock() with the provided key will work to enable them.
- *
- * Normally, in SMP mode this function will be called by the kernel
- * initialization and should not be used as a user API.  But it is defined here
- * for special-purpose apps which want Zephyr running on one core and to use
- * others for design-specific processing.
- *
- * @param cpu_num Integer number of the CPU
- * @param stack Stack memory for the CPU
- * @param sz Stack buffer size, in bytes
- * @param fn Function to begin running on the CPU.
- * @param arg Untyped argument to be passed to "fn"
- */
+  * @brief  启动指定的其他 CPU，并使其进入给定入口。
+  * @param  cpu_num：[输入]CPU 编号；启动主 CPU 为 0，其他 CPU 连续编号。
+  * @param  stack：[输入/输出]该 CPU 的有效栈区域，不可为空，运行期间必须持续有效。
+  * @param  sz：[输入]栈容量，单位字节，须满足架构要求。
+  * @param  fn：[输入]该 CPU 的不返回入口，不可为空。
+  * @param  arg：[输入]原样传给 fn 的上下文指针，可为空，使用期须有效。
+  * @retval 无；返回时目标 CPU 已开始运行。
+  * @note   适用支持多 CPU 启动的架构；通常由 SMP 初始化调用。新 CPU 的中断已初始化但处于关闭状态，入口再按架构规则开放。
+  */
 void arch_start_cpu(int cpu_num, k_thread_stack_t *stack, int sz,
 		    arch_cpustart_t fn, void *arg);
 
 /**
- * @brief Return CPU power status
- *
- * @param cpu_num Integer number of the CPU
- */
+  * @brief  查询指定 CPU 的运行/供电活动状态。
+  * @param  cpu_num：[输入]平台支持的 CPU 编号。
+  * @retval true 表示活动，false 表示未活动。
+  * @note   状态定义由架构实现确定；当前单核 SPI 流程不使用其他 CPU 启动接口。
+  */
 bool arch_cpu_active(int cpu_num);
 
 /** @} */
@@ -233,702 +156,549 @@ bool arch_cpu_active(int cpu_num);
  */
 
 #ifndef CONFIG_DISABLE_IRQ_STAT
+
 /**
- * Lock interrupts on the current CPU
- *
- * @see irq_lock()
- */
+  * @brief  保存并锁定当前 CPU 的普通中断。
+  * @param  无。
+  * @retval 调用前的中断状态键，供对应 unlock 恢复。
+  * @note   当前 ARM Mainline 实现使用 BASEPRI，仅屏蔽受其优先级门限控制的中断，不等同于屏蔽全部异常；CONFIG_DISABLE_IRQ_STAT 决定内联或外部包装。
+  */
 static inline unsigned int arch_irq_lock(void);
 
 /**
- * Unlock interrupts on the current CPU
- *
- * @see irq_unlock()
- */
+  * @brief  按保存的状态键恢复当前 CPU 的中断屏蔽状态。
+  * @param  key：[输入]同一 CPU 上配对 arch_irq_lock 返回的状态键。
+  * @retval 无。
+  * @note   嵌套锁须按逆序恢复；不会因为调用 unlock 就无条件开放全部中断。
+  */
 static inline void arch_irq_unlock(unsigned int key);
 
 #else
 
 /**
- * Lock interrupts on the current CPU
- *
- * @see irq_lock()
- */
+  * @brief  保存并锁定当前 CPU 的普通中断。
+  * @param  无。
+  * @retval 调用前的中断状态键，供对应 unlock 恢复。
+  * @note   当前 ARM Mainline 实现使用 BASEPRI，仅屏蔽受其优先级门限控制的中断，不等同于屏蔽全部异常；CONFIG_DISABLE_IRQ_STAT 决定内联或外部包装。
+  */
 extern unsigned int arch_irq_lock(void);
 
 /**
- * Unlock interrupts on the current CPU
- *
- * @see irq_unlock()
- */
+  * @brief  按保存的状态键恢复当前 CPU 的中断屏蔽状态。
+  * @param  key：[输入]同一 CPU 上配对 arch_irq_lock 返回的状态键。
+  * @retval 无。
+  * @note   嵌套锁须按逆序恢复；不会因为调用 unlock 就无条件开放全部中断。
+  */
 extern void arch_irq_unlock(unsigned int key);
 
 #endif
 
 /**
- * Test if calling arch_irq_unlock() with this key would unlock irqs
- *
- * @param key value returned by arch_irq_lock()
- * @return true if interrupts were unlocked prior to the arch_irq_lock()
- * call that produced the key argument.
- */
+  * @brief  判断给定状态键是否代表此前普通中断未锁定。
+  * @param  key：[输入]arch_irq_lock 返回的状态键。
+  * @retval true 表示按此键恢复会解除对应中断锁；false 表示仍锁定。
+  * @note   仅检查键值，不修改硬件状态；与架构的屏蔽规则对应。
+  */
 static inline bool arch_irq_unlocked(unsigned int key);
 
 /**
- * Disable the specified interrupt line
- *
- * @note: The behavior of interrupts that arrive after this call
- * returns and before the corresponding call to arch_irq_enable() is
- * undefined.  The hardware is not required to latch and deliver such
- * an interrupt, though on some architectures that may work.  Other
- * architectures will simply lose such an interrupt and never deliver
- * it.  Many drivers and subsystems are not tolerant of such dropped
- * interrupts and it is the job of the application layer to ensure
- * that behavior remains correct.
- *
- * @see irq_disable()
- */
+  * @brief  禁止指定的硬件中断线。
+  * @param  irq：[输入]架构对应的有效中断线编号。
+  * @retval 无。
+  * @note   禁止期间到达的中断是否锁存由硬件决定，接口不保证重使能后补发；调用方须能容忍丢失事件。
+  */
 void arch_irq_disable(unsigned int irq);
 
 /**
- * Enable the specified interrupt line
- *
- * @see irq_enable()
- */
+  * @brief  允许指定的硬件中断线。
+  * @param  irq：[输入]有效中断线编号。
+  * @retval 无。
+  * @note   需先安装处理程序并完成设备配置；CPU 级中断锁仍可能阻止其执行。
+  */
 void arch_irq_enable(unsigned int irq);
 
 /**
- * Test if an interrupt line is enabled
- *
- * @see irq_is_enabled()
- */
+  * @brief  查询指定硬件中断线是否已使能。
+  * @param  irq：[输入]有效中断线编号。
+  * @retval 非零表示已使能，0 表示未使能。
+  * @note   查询线路状态，不保证当前 CPU 屏蔽门限允许立即处理中断。
+  */
 int arch_irq_is_enabled(unsigned int irq);
 
 /**
- * Arch-specific hook to install a dynamic interrupt.
- *
- * @param irq IRQ line number
- * @param priority Interrupt priority
- * @param routine Interrupt service routine
- * @param parameter ISR parameter
- * @param flags Arch-specific IRQ configuration flag
- *
- * @return The vector assigned to this interrupt
- */
+  * @brief  动态安装指定中断线的处理函数。
+  * @param  irq：[输入]有效硬件中断线编号。
+  * @param  priority：[输入]架构支持的中断优先级，数值规则由架构定义。
+  * @param  routine：[输入]中断服务函数，不可为空；接收 parameter。
+  * @param  parameter：[输入]传给服务函数的上下文，可为空，须在注册有效期内保持可访问。
+  * @param  flags：[输入]架构定义的 IRQ 配置位。
+  * @retval 分配给该中断的向量编号；错误约定须查对应架构实现。
+  * @note   动态中断能力须由配置和架构支持；处理函数在中断上下文运行，不应阻塞。
+  */
 int arch_irq_connect_dynamic(unsigned int irq, unsigned int priority,
 			     void (*routine)(const void *parameter),
 			     const void *parameter, uint32_t flags);
 
 /**
  * @def ARCH_IRQ_CONNECT(irq, pri, isr, arg, flags)
- *
- * @see IRQ_CONNECT()
+ * 静态中断连接的架构入口，参数依次是中断号、优先级、服务函数、上下文和标志，供 IRQ_CONNECT 使用。
  */
 
 /**
  * @def ARCH_IRQ_DIRECT_CONNECT(irq_p, priority_p, isr_p, flags_p)
- *
- * @see IRQ_DIRECT_CONNECT()
+ * 直接中断的架构连接宏，直接入口承担普通分派器原先的部分工作，参数及限制见 IRQ_DIRECT_CONNECT。
  */
 
 /**
  * @def ARCH_ISR_DIRECT_PM()
- *
- * @see ISR_DIRECT_PM()
+ * 直接中断中按电源管理规则通知或恢复内核的架构钩子。
  */
 
 /**
  * @def ARCH_ISR_DIRECT_HEADER()
- *
- * @see ISR_DIRECT_HEADER()
+ * 直接中断服务例程入口的架构准备操作。
  */
 
 /**
  * @def ARCH_ISR_DIRECT_FOOTER(swap)
- *
- * @see ISR_DIRECT_FOOTER()
+ * 直接中断退出操作；swap 参数控制是否需要考虑线程重新调度。
  */
 
 /**
  * @def ARCH_ISR_DIRECT_DECLARE(name)
- *
- * @see ISR_DIRECT_DECLARE()
+ * 按架构调用约定声明指定名称的直接中断服务函数。
  */
 
 /**
  * @def ARCH_EXCEPT(reason_p)
- *
- * Generate a software induced fatal error.
- *
- * If the caller is running in user mode, only K_ERR_KERNEL_OOPS or
- * K_ERR_STACK_CHK_FAIL may be induced.
- *
- * This should ideally generate a software trap, with exception context
- * indicating state when this was invoked. General purpose register state at
- * the time of trap should not be disturbed from the calling context.
- *
- * @param reason_p K_ERR_ scoped reason code for the fatal error.
+ * 用 reason_p 指定 K_ERR_ 原因码触发软件致命异常。用户态只允许 K_ERR_KERNEL_OOPS 或 K_ERR_STACK_CHK_FAIL；应以软件陷阱保留调用点异常上下文，避免提前破坏通用寄存器。
  */
 
 #ifdef CONFIG_IRQ_OFFLOAD
+
 /**
- * Run a function in interrupt context.
- *
- * Implementations should invoke an exception such that the kernel goes through
- * its interrupt handling dispatch path, to include switching to the interrupt
- * stack, and runs the provided routine and parameter.
- *
- * The only intended use-case for this function is for test code to simulate
- * the correctness of kernel APIs in interrupt handling context. This API
- * is not intended for real applications.
- *
- * @see irq_offload()
- *
- * @param routine Function to run in interrupt context
- * @param parameter Value to pass to the function when invoked
- */
+  * @brief  通过异常入口在中断上下文执行测试回调。
+  * @param  routine：[输入]要执行的回调，不可为空，须遵守中断上下文限制。
+  * @param  parameter：[输入]传给回调的上下文指针，可为空，调用期间须有效。
+  * @retval 无。
+  * @note   仅 CONFIG_IRQ_OFFLOAD 启用时存在；应经过普通异常分派和中断栈切换，面向测试内核 API 的中断行为。
+  */
 void arch_irq_offload(irq_offload_routine_t routine, const void *parameter);
-#endif /* CONFIG_IRQ_OFFLOAD */
+#endif    /* CONFIG_IRQ_OFFLOAD 条件或包含保护结束。 */
 
 /** @} */
 
 
 /**
- * @defgroup arch-smp Architecture-specific SMP APIs
+ * @defgroup arch-smp 架构多核接口
  * @ingroup arch-interface
  * @{
  */
 #ifdef CONFIG_SMP
-/** Return the CPU struct for the currently executing CPU */
+
+/**
+  * @brief  取得执行当前指令的 CPU 状态对象。
+  * @param  无。
+  * @retval 当前 CPU 的 _cpu 对象指针。
+  * @note   仅 CONFIG_SMP 声明此内联接口；指针所指 CPU 身份可能因线程迁移而改变，调用方须按用途保持合适的调度约束。
+  */
 static inline struct _cpu *arch_curr_cpu(void);
 
 /**
- * Broadcast an interrupt to all CPUs
- *
- * This will invoke z_sched_ipi() on other CPUs in the system.
- */
+  * @brief  向其他 CPU 发送调度中断。
+  * @param  无。
+  * @retval 无。
+  * @note   仅 SMP 配置使用；接收 CPU 经该中断运行 z_sched_ipi，促使重新评估调度。
+  */
 void arch_sched_ipi(void);
-#endif /* CONFIG_SMP */
+#endif    /* CONFIG_SMP 条件或包含保护结束。 */
 
 /** @} */
 
 
 /**
- * @defgroup arch-userspace Architecture-specific userspace APIs
+ * @defgroup arch-userspace 架构用户态接口
  * @ingroup arch-interface
  * @{
  */
 
 #ifdef CONFIG_USERSPACE
+
 /**
- * Invoke a system call with 0 arguments.
- *
- * No general-purpose register state other than return value may be preserved
- * when transitioning from supervisor mode back down to user mode for
- * security reasons.
- *
- * It is required that all arguments be stored in registers when elevating
- * privileges from user to supervisor mode.
- *
- * Processing of the syscall takes place on a separate kernel stack. Interrupts
- * should be enabled when invoking the system call marshallers from the
- * dispatch table. Thread preemption may occur when handling system calls.
- *
- * Call ids are untrusted and must be bounds-checked, as the value is used to
- * index the system call dispatch table, containing function pointers to the
- * specific system call code.
- *
- * @param call_id System call ID
- * @return Return value of the system call. Void system calls return 0 here.
- */
+  * @brief  以 0 个机器字参数触发用户态系统调用。
+  * @param  call_id：[输入]系统调用编号，内核分派前必须做边界检查。
+  * @retval 具体系统调用的机器字返回结果；无返回值的系统调用在此返回 0。
+  * @note   仅 CONFIG_USERSPACE 分支；参数通过寄存器传入，内核使用独立内核栈，分派处理允许中断及抢占。返回用户态须避免泄露除返回值外的内核通用寄存器内容。
+  */
 static inline uintptr_t arch_syscall_invoke0(uintptr_t call_id);
 
 /**
- * Invoke a system call with 1 argument.
- *
- * @see arch_syscall_invoke0()
- *
- * @param arg1 First argument to the system call.
- * @param call_id System call ID, will be bounds-checked and used to reference
- *	          kernel-side dispatch table
- * @return Return value of the system call. Void system calls return 0 here.
- */
+  * @brief  以 1 个机器字参数触发用户态系统调用。
+  * @param  arg1：[输入]第 1 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  call_id：[输入]系统调用编号，内核分派前必须做边界检查。
+  * @retval 具体系统调用的机器字返回结果；无返回值的系统调用在此返回 0。
+  * @note   仅 CONFIG_USERSPACE 分支；参数通过寄存器传入，内核使用独立内核栈，分派处理允许中断及抢占。返回用户态须避免泄露除返回值外的内核通用寄存器内容。
+  */
 static inline uintptr_t arch_syscall_invoke1(uintptr_t arg1,
 					     uintptr_t call_id);
 
 /**
- * Invoke a system call with 2 arguments.
- *
- * @see arch_syscall_invoke0()
- *
- * @param arg1 First argument to the system call.
- * @param arg2 Second argument to the system call.
- * @param call_id System call ID, will be bounds-checked and used to reference
- *	          kernel-side dispatch table
- * @return Return value of the system call. Void system calls return 0 here.
- */
+  * @brief  以 2 个机器字参数触发用户态系统调用。
+  * @param  arg1：[输入]第 1 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg2：[输入]第 2 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  call_id：[输入]系统调用编号，内核分派前必须做边界检查。
+  * @retval 具体系统调用的机器字返回结果；无返回值的系统调用在此返回 0。
+  * @note   仅 CONFIG_USERSPACE 分支；参数通过寄存器传入，内核使用独立内核栈，分派处理允许中断及抢占。返回用户态须避免泄露除返回值外的内核通用寄存器内容。
+  */
 static inline uintptr_t arch_syscall_invoke2(uintptr_t arg1, uintptr_t arg2,
 					     uintptr_t call_id);
 
 /**
- * Invoke a system call with 3 arguments.
- *
- * @see arch_syscall_invoke0()
- *
- * @param arg1 First argument to the system call.
- * @param arg2 Second argument to the system call.
- * @param arg3 Third argument to the system call.
- * @param call_id System call ID, will be bounds-checked and used to reference
- *	          kernel-side dispatch table
- * @return Return value of the system call. Void system calls return 0 here.
- */
+  * @brief  以 3 个机器字参数触发用户态系统调用。
+  * @param  arg1：[输入]第 1 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg2：[输入]第 2 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg3：[输入]第 3 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  call_id：[输入]系统调用编号，内核分派前必须做边界检查。
+  * @retval 具体系统调用的机器字返回结果；无返回值的系统调用在此返回 0。
+  * @note   仅 CONFIG_USERSPACE 分支；参数通过寄存器传入，内核使用独立内核栈，分派处理允许中断及抢占。返回用户态须避免泄露除返回值外的内核通用寄存器内容。
+  */
 static inline uintptr_t arch_syscall_invoke3(uintptr_t arg1, uintptr_t arg2,
 					     uintptr_t arg3,
 					     uintptr_t call_id);
 
 /**
- * Invoke a system call with 4 arguments.
- *
- * @see arch_syscall_invoke0()
- *
- * @param arg1 First argument to the system call.
- * @param arg2 Second argument to the system call.
- * @param arg3 Third argument to the system call.
- * @param arg4 Fourth argument to the system call.
- * @param call_id System call ID, will be bounds-checked and used to reference
- *	          kernel-side dispatch table
- * @return Return value of the system call. Void system calls return 0 here.
- */
+  * @brief  以 4 个机器字参数触发用户态系统调用。
+  * @param  arg1：[输入]第 1 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg2：[输入]第 2 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg3：[输入]第 3 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg4：[输入]第 4 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  call_id：[输入]系统调用编号，内核分派前必须做边界检查。
+  * @retval 具体系统调用的机器字返回结果；无返回值的系统调用在此返回 0。
+  * @note   仅 CONFIG_USERSPACE 分支；参数通过寄存器传入，内核使用独立内核栈，分派处理允许中断及抢占。返回用户态须避免泄露除返回值外的内核通用寄存器内容。
+  */
 static inline uintptr_t arch_syscall_invoke4(uintptr_t arg1, uintptr_t arg2,
 					     uintptr_t arg3, uintptr_t arg4,
 					     uintptr_t call_id);
 
 /**
- * Invoke a system call with 5 arguments.
- *
- * @see arch_syscall_invoke0()
- *
- * @param arg1 First argument to the system call.
- * @param arg2 Second argument to the system call.
- * @param arg3 Third argument to the system call.
- * @param arg4 Fourth argument to the system call.
- * @param arg5 Fifth argument to the system call.
- * @param call_id System call ID, will be bounds-checked and used to reference
- *	          kernel-side dispatch table
- * @return Return value of the system call. Void system calls return 0 here.
- */
+  * @brief  以 5 个机器字参数触发用户态系统调用。
+  * @param  arg1：[输入]第 1 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg2：[输入]第 2 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg3：[输入]第 3 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg4：[输入]第 4 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg5：[输入]第 5 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  call_id：[输入]系统调用编号，内核分派前必须做边界检查。
+  * @retval 具体系统调用的机器字返回结果；无返回值的系统调用在此返回 0。
+  * @note   仅 CONFIG_USERSPACE 分支；参数通过寄存器传入，内核使用独立内核栈，分派处理允许中断及抢占。返回用户态须避免泄露除返回值外的内核通用寄存器内容。
+  */
 static inline uintptr_t arch_syscall_invoke5(uintptr_t arg1, uintptr_t arg2,
 					     uintptr_t arg3, uintptr_t arg4,
 					     uintptr_t arg5,
 					     uintptr_t call_id);
 
 /**
- * Invoke a system call with 6 arguments.
- *
- * @see arch_syscall_invoke0()
- *
- * @param arg1 First argument to the system call.
- * @param arg2 Second argument to the system call.
- * @param arg3 Third argument to the system call.
- * @param arg4 Fourth argument to the system call.
- * @param arg5 Fifth argument to the system call.
- * @param arg6 Sixth argument to the system call.
- * @param call_id System call ID, will be bounds-checked and used to reference
- *	          kernel-side dispatch table
- * @return Return value of the system call. Void system calls return 0 here.
- */
+  * @brief  以 6 个机器字参数触发用户态系统调用。
+  * @param  arg1：[输入]第 1 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg2：[输入]第 2 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg3：[输入]第 3 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg4：[输入]第 4 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg5：[输入]第 5 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  arg6：[输入]第 6 个机器字参数；若承载指针，其长度、权限和可空性由具体系统调用校验。
+  * @param  call_id：[输入]系统调用编号，内核分派前必须做边界检查。
+  * @retval 具体系统调用的机器字返回结果；无返回值的系统调用在此返回 0。
+  * @note   仅 CONFIG_USERSPACE 分支；参数通过寄存器传入，内核使用独立内核栈，分派处理允许中断及抢占。返回用户态须避免泄露除返回值外的内核通用寄存器内容。
+  */
 static inline uintptr_t arch_syscall_invoke6(uintptr_t arg1, uintptr_t arg2,
 					     uintptr_t arg3, uintptr_t arg4,
 					     uintptr_t arg5, uintptr_t arg6,
 					     uintptr_t call_id);
 
 /**
- * Indicate whether we are currently running in user mode
- *
- * @return true if the CPU is currently running with user permissions
- */
+  * @brief  检查当前执行上下文是否拥有用户态权限。
+  * @param  无。
+  * @retval true 表示用户态，false 表示特权态。
+  * @note   仅 CONFIG_USERSPACE 分支声明，判断依据由架构实现。
+  */
 static inline bool arch_is_user_context(void);
 
 /**
- * @brief Get the maximum number of partitions for a memory domain
- *
- * @return Max number of partitions, or -1 if there is no limit
- */
+  * @brief  取得一个内存域最多支持的分区数。
+  * @param  无。
+  * @retval 非负数为最大分区数量，-1 表示无固定上限。
+  * @note   仅用户态内存保护流程使用；具体上限取决于 MPU/MMU 实现。
+  */
 int arch_mem_domain_max_partitions_get(void);
 
 #ifdef CONFIG_ARCH_MEM_DOMAIN_DATA
+
 /**
- *
- * @brief Architecture-specific hook for memory domain initialization
- *
- * Perform any tasks needed to initialize architecture-specific data within
- * the memory domain, such as reserving memory for page tables. All members
- * of the provided memory domain aside from `arch` will be initialized when
- * this is called, but no threads will be a assigned yet.
- *
- * This function may fail if initializing the memory domain requires allocation,
- * such as for page tables.
- *
- * The associated function k_mem_domain_init() documents that making
- * multiple init calls to the same memory domain is undefined behavior,
- * but has no assertions in place to check this. If this matters, it may be
- * desirable to add checks for this in the implementation of this function.
- *
- * @param domain The memory domain to initialize
- * @retval 0 Success
- * @retval -ENOMEM Insufficient memory
- */
+  * @brief  初始化内存域中的架构私有数据。
+  * @param  domain：[输入/输出]待初始化内存域，不可为空；除 arch 外的成员已初始化，尚未加入线程。
+  * @retval 0 表示成功，-ENOMEM 表示页表等资源不足。
+  * @note   仅 CONFIG_ARCH_MEM_DOMAIN_DATA 分支；同一内存域重复初始化属于未定义行为，通用接口不保证替实现检查。
+  */
 int arch_mem_domain_init(struct k_mem_domain *domain);
-#endif /* CONFIG_ARCH_MEM_DOMAIN_DATA */
+#endif    /* CONFIG_ARCH_MEM_DOMAIN_DATA 条件或包含保护结束。 */
 
 #ifdef CONFIG_ARCH_MEM_DOMAIN_SYNCHRONOUS_API
+
 /**
- * @brief Add a thread to a memory domain (arch-specific)
- *
- * Architecture-specific hook to manage internal data structures or hardware
- * state when the provided thread has been added to a memory domain.
- *
- * The thread->mem_domain_info.mem_domain pointer will be set to the domain to
- * be added to before this is called. Implementations may assume that the
- * thread is not already a member of this domain.
- *
- * @param thread Thread which needs to be configured.
- */
+  * @brief  在线程加入内存域时更新架构状态。
+  * @param  thread：[输入/输出]待配置线程，不可为空；其 mem_domain_info 指向本次涉及的内存域。
+  * @retval 无。
+  * @note   仅同步内存域 API 配置；add 时线程此前不属于此域，remove 时线程指针仍指向将移出的域。
+  */
 void arch_mem_domain_thread_add(struct k_thread *thread);
 
 /**
- * @brief Remove a thread from a memory domain (arch-specific)
- *
- * Architecture-specific hook to manage internal data structures or hardware
- * state when the provided thread has been removed from a memory domain.
- *
- * The thread's memory domain pointer will be the domain that the thread
- * is being removed from.
- *
- * @param thread Thread being removed from its memory domain
- */
+  * @brief  在线程移出内存域时更新架构状态。
+  * @param  thread：[输入/输出]待配置线程，不可为空；其 mem_domain_info 指向本次涉及的内存域。
+  * @retval 无。
+  * @note   仅同步内存域 API 配置；add 时线程此前不属于此域，remove 时线程指针仍指向将移出的域。
+  */
 void arch_mem_domain_thread_remove(struct k_thread *thread);
 
 /**
- * @brief Remove a partition from the memory domain (arch-specific)
- *
- * Architecture-specific hook to manage internal data structures or hardware
- * state when a memory domain has had a partition removed.
- *
- * The partition index data, and the number of partitions configured, are not
- * respectively cleared and decremented in the domain until after this function
- * runs.
- *
- * @param domain The memory domain structure
- * @param partition_id The partition index that needs to be deleted
- */
+  * @brief  在内存域移除分区时同步架构状态。
+  * @param  domain：[输入/输出]有效内存域对象，不可为空。
+  * @param  partition_id：[输入]该内存域中的有效分区索引。
+  * @retval 无。
+  * @note   仅 CONFIG_ARCH_MEM_DOMAIN_SYNCHRONOUS_API 分支；移除回调运行时，通用层尚未清除分区记录或递减分区数。
+  */
 void arch_mem_domain_partition_remove(struct k_mem_domain *domain,
 				      uint32_t partition_id);
 
 /**
- * @brief Add a partition to the memory domain
- *
- * Architecture-specific hook to manage internal data structures or hardware
- * state when a memory domain has a partition added.
- *
- * @param domain The memory domain structure
- * @param partition_id The partition that needs to be added
- */
+  * @brief  在内存域加入分区时同步架构状态。
+  * @param  domain：[输入/输出]有效内存域对象，不可为空。
+  * @param  partition_id：[输入]该内存域中的有效分区索引。
+  * @retval 无。
+  * @note   仅 CONFIG_ARCH_MEM_DOMAIN_SYNCHRONOUS_API 分支；移除回调运行时，通用层尚未清除分区记录或递减分区数。
+  */
 void arch_mem_domain_partition_add(struct k_mem_domain *domain,
 				   uint32_t partition_id);
-#endif /* CONFIG_ARCH_MEM_DOMAIN_SYNCHRONOUS_API */
+#endif    /* CONFIG_ARCH_MEM_DOMAIN_SYNCHRONOUS_API 条件或包含保护结束。 */
 
 /**
- * @brief Check memory region permissions
- *
- * Given a memory region, return whether the current memory management hardware
- * configuration would allow a user thread to read/write that region. Used by
- * system calls to validate buffers coming in from userspace.
- *
- * Notes:
- * The function is guaranteed to never return validation success, if the entire
- * buffer area is not user accessible.
- *
- * The function is guaranteed to correctly validate the permissions of the
- * supplied buffer, if the user access permissions of the entire buffer are
- * enforced by a single, enabled memory management region.
- *
- * In some architectures the validation will always return failure
- * if the supplied memory buffer spans multiple enabled memory management
- * regions (even if all such regions permit user access).
- *
- * @warning 0 size buffer has undefined behavior.
- *
- * @param addr start address of the buffer
- * @param size the size of the buffer
- * @param write If nonzero, additionally check if the area is writable.
- *	  Otherwise, just check if the memory can be read.
- *
- * @return nonzero if the permissions don't match.
- */
+  * @brief  核对整个缓冲区是否具备用户态访问权限。
+  * @param  addr：[输入]被检查区域首址，检查地址权限而非读取其内容。
+  * @param  size：[输入]区域长度，单位字节，必须大于 0。
+  * @param  write：[输入]非零表示同时要求可写，0 仅要求可读。
+  * @retval 0 表示校验成功，非零表示权限不符或无法确认整个区域可访问。
+  * @note   不能错误地接受部分不可访问的区域；单一启用保护区覆盖全缓冲时须准确校验。跨多个区即使均可访问，某些架构也可能保守失败。
+  */
 int arch_buffer_validate(void *addr, size_t size, int write);
 
 /**
- * Perform a one-way transition from supervisor to kernel mode.
- *
- * Implementations of this function must do the following:
- *
- * - Reset the thread's stack pointer to a suitable initial value. We do not
- *   need any prior context since this is a one-way operation.
- * - Set up any kernel stack region for the CPU to use during privilege
- *   elevation
- * - Put the CPU in whatever its equivalent of user mode is
- * - Transfer execution to arch_new_thread() passing along all the supplied
- *   arguments, in user mode.
- *
- * @param user_entry Entry point to start executing as a user thread
- * @param p1 1st parameter to user thread
- * @param p2 2nd parameter to user thread
- * @param p3 3rd parameter to user thread
- */
+  * @brief  由特权线程单向进入用户态入口。
+  * @param  user_entry：[输入]用户线程入口，不可为空，使用三个参数。
+  * @param  p1：[输入]入口首参数，可为空；访问权限及寿命由入口约定。
+  * @param  p2：[输入]入口第二参数，可为空。
+  * @param  p3：[输入]入口第三参数，可为空。
+  * @retval 不返回。
+  * @note   仅用户态配置；重置用户栈指针、准备提权用内核栈、降低 CPU 权限后进入用户入口。原英文标题将目标误写为 kernel mode，此处按实际用户态接口纠正。
+  */
 FUNC_NORETURN void arch_user_mode_enter(k_thread_entry_t user_entry,
 					void *p1, void *p2, void *p3);
 
 /**
- * @brief Induce a kernel oops that appears to come from a specific location
- *
- * Normally, k_oops() generates an exception that appears to come from the
- * call site of the k_oops() itself.
- *
- * However, when validating arguments to a system call, if there are problems
- * we want the oops to appear to come from where the system call was invoked
- * and not inside the validation function.
- *
- * @param ssf System call stack frame pointer. This gets passed as an argument
- *            to _k_syscall_handler_t functions and its contents are completely
- *            architecture specific.
- */
+  * @brief  以系统调用原始调用点的上下文触发内核 oops。
+  * @param  ssf：[输入]系统调用保存的架构栈帧指针，不可为空，布局由架构规定。
+  * @retval 不返回。
+  * @note   用于系统调用参数校验失败，让异常指向用户调用位置而非校验函数内部。
+  */
 FUNC_NORETURN void arch_syscall_oops(void *ssf);
 
 /**
- * @brief Safely take the length of a potentially bad string
- *
- * This must not fault, instead the err parameter must have -1 written to it.
- * This function otherwise should work exactly like libc strnlen(). On success
- * *err should be set to 0.
- *
- * @param s String to measure
- * @param maxsize Max length of the string
- * @param err Error value to write
- * @return Length of the string, not counting NULL byte, up to maxsize
- */
+  * @brief  安全测量可能无效的用户字符串长度。
+  * @param  s：[输入]待测字符串地址，可无效但接口不得因此产生未处理故障。
+  * @param  maxsize：[输入]最多检查的字节数，不计结尾零字符。
+  * @param  err：[输出]有效可写 int 指针，不可为空；成功写 0，访问失败写 -1。
+  * @retval 不包含零字符的长度，最大 maxsize；失败时须结合 *err 判断。
+  * @note   除安全处理无效地址外，语义类似 strnlen；用户态配置使用。
+  */
 size_t arch_user_string_nlen(const char *s, size_t maxsize, int *err);
-#endif /* CONFIG_USERSPACE */
+#endif    /* CONFIG_USERSPACE 条件或包含保护结束。 */
 
 /**
- * @brief Detect memory coherence type
- *
- * Required when ARCH_HAS_COHERENCE is true.  This function returns
- * true if the byte pointed to lies within an architecture-defined
- * "coherence region" (typically implemented with uncached memory) and
- * can safely be used in multiprocessor code without explicit flush or
- * invalidate operations.
- *
- * @note The result is for only the single byte at the specified
- * address, this API is not required to check region boundaries or to
- * expect aligned pointers.  The expectation is that the code above
- * will have queried the appropriate address(es).
- */
+  * @brief  判断地址是否属于无需显式缓存维护的一致性区域。
+  * @param  ptr：[输入]待查询字节地址，仅检查位置，不解引用。
+  * @retval true 表示该字节具备架构要求的一致性；false 表示不具备。
+  * @note   只查询单字节，不检查整段边界或对齐。当前提供的是 !CONFIG_ARCH_HAS_COHERENCE 的缺省实现，忽略地址并恒返回 true；有该能力的架构须自行实现。
+  */
 #ifndef CONFIG_ARCH_HAS_COHERENCE
 static inline bool arch_mem_coherent(void *ptr)
 {
-	ARG_UNUSED(ptr);
-	return true;
+	ARG_UNUSED(ptr);    /* 缺省一致性查询不检查地址。 */
+	return true;        /* 没有架构特殊一致性要求时采用恒真的兼容结果。 */
 }
 #endif
 
 /**
- * @brief Ensure cache coherence prior to context switch
- *
- * Required when ARCH_HAS_COHERENCE is true.  On cache-incoherent
- * multiprocessor architectures, thread stacks are cached by default
- * for performance reasons.  They must therefore be flushed
- * appropriately on context switch.  The rules are:
- *
- * 1. The region containing live data in the old stack (generally the
- *    bytes between the current stack pointer and the top of the stack
- *    memory) must be flushed to underlying storage so a new CPU that
- *    runs the same thread sees the correct data.  This must happen
- *    before the assignment of the switch_handle field in the thread
- *    struct which signals the completion of context switch.
- *
- * 2. Any data areas to be read from the new stack (generally the same
- *    as the live region when it was saved) should be invalidated (and
- *    NOT flushed!) in the data cache.  This is because another CPU
- *    may have run or re-initialized the thread since this CPU
- *    suspended it, and any data present in cache will be stale.
- *
- * @note The kernel will call this function during interrupt exit when
- * a new thread has been chosen to run, and also immediately before
- * entering arch_switch() to effect a code-driven context switch.  In
- * the latter case, it is very likely that more data will be written
- * to the old_thread stack region after this function returns but
- * before the completion of the switch.  Simply flushing naively here
- * is not sufficient on many architectures and coordination with the
- * arch_switch() implementation is likely required.
- *
- * @arg old_thread The old thread to be flushed before being allowed
- *                 to run on other CPUs.
- * @arg old_switch_handle The switch handle to be stored into
- *                        old_thread (it will not be valid until the
- *                        cache is flushed so is not present yet).
- *                        This will be NULL if inside z_swap()
- *                        (because the arch_switch() has not saved it
- *                        yet).
- * @arg new_thread The new thread to be invalidated before it runs locally.
- */
+  * @brief  在线程切换前对旧栈和新栈进行所需的一致性维护。
+  * @param  old_thread：[输入/输出]被切出的有效线程；缺省空实现不访问。
+  * @param  old_switch_handle：[输入]将保存的旧上下文句柄，z_swap 尚未保存时可为空。
+  * @param  new_thread：[输入/输出]将运行的有效线程；缺省空实现不访问。
+  * @retval 无。
+  * @note   !CONFIG_KERNEL_COHERENCE 时为空实现。启用时须先写回旧栈活跃数据再发布 switch_handle；新栈应失效而非写回以免覆盖其他 CPU 的新数据。真正切换前仍可能写旧栈，架构切换实现须配合。
+  */
 #ifndef CONFIG_KERNEL_COHERENCE
 static inline void arch_cohere_stacks(struct k_thread *old_thread,
 				      void *old_switch_handle,
 				      struct k_thread *new_thread)
 {
-	ARG_UNUSED(old_thread);
-	ARG_UNUSED(old_switch_handle);
-	ARG_UNUSED(new_thread);
+	ARG_UNUSED(old_thread);           /* 缺省实现不维护旧栈。 */
+	ARG_UNUSED(old_switch_handle);    /* 缺省实现不使用切换句柄。 */
+	ARG_UNUSED(new_thread);           /* 缺省实现不维护新栈。 */
 }
 #endif
 
 /** @} */
 
 /**
- * @defgroup arch-gdbstub Architecture-specific gdbstub APIs
+ * @defgroup arch-gdbstub 架构 GDB 调试接口
  * @ingroup arch-interface
  * @{
  */
 
 /**
  * @def ARCH_GDB_NUM_REGISTERS
- *
- * ARCH_GDB_NUM_REGISTERS is architecure specific and
- * this symbol must be defined in architecure specific header
+ * 架构 GDB 寄存器数量，实际宏必须由相应架构头提供。
  */
 
 #ifdef CONFIG_GDBSTUB
+
 /**
- * @brief Architecture layer debug start
- *
- * This function is called by @c gdb_init()
- */
+  * @brief  初始化架构的 GDB 调试支持。
+  * @param  无。
+  * @retval 无。
+  * @note   仅 CONFIG_GDBSTUB 配置；具体断点、寄存器和执行控制机制由架构提供。
+  */
 void arch_gdb_init(void);
 
 /**
- * @brief Continue running program
- *
- * Continue software execution.
- */
+  * @brief  从调试停止状态继续执行程序。
+  * @param  无。
+  * @retval 无。
+  * @note   仅 CONFIG_GDBSTUB 配置；具体断点、寄存器和执行控制机制由架构提供。
+  */
 void arch_gdb_continue(void);
 
 /**
- * @brief Continue with one step
- *
- * Continue software execution until reaches the next statement.
- */
+  * @brief  按架构单步机制继续执行下一步。
+  * @param  无。
+  * @retval 无。
+  * @note   仅 CONFIG_GDBSTUB 配置；具体断点、寄存器和执行控制机制由架构提供。
+  */
 void arch_gdb_step(void);
 
 #endif
 /** @} */
 
 /**
- * @defgroup arch_cache Architecture-specific cache functions
+ * @defgroup arch_cache 架构缓存接口
  * @ingroup arch-interface
  * @{
  */
 
 #if defined(CONFIG_CACHE_MANAGEMENT) && defined(CONFIG_HAS_ARCH_CACHE)
+
 /**
- *
- * @brief Enable d-cache
- *
- * @see arch_dcache_enable
- */
+  * @brief  启用数据缓存。
+  * @param  无。
+  * @retval 无。
+  * @note   仅缓存管理且存在架构缓存能力时声明；缓存脏数据处理及屏障要求须以架构实现为准。本头原有第二个 arch_dcache_disable 声明重复，保持代码原状。
+  */
 void arch_dcache_enable(void);
 
 /**
- *
- * @brief Disable d-cache
- *
- * @see arch_dcache_disable
- */
+  * @brief  关闭数据缓存。
+  * @param  无。
+  * @retval 无。
+  * @note   仅缓存管理且存在架构缓存能力时声明；缓存脏数据处理及屏障要求须以架构实现为准。本头原有第二个 arch_dcache_disable 声明重复，保持代码原状。
+  */
 void arch_dcache_disable(void);
 
 /**
- *
- * @brief Enable i-cache
- *
- * @see arch_icache_enable
- */
+  * @brief  启用指令缓存。
+  * @param  无。
+  * @retval 无。
+  * @note   仅缓存管理且存在架构缓存能力时声明；缓存脏数据处理及屏障要求须以架构实现为准。本头原有第二个 arch_dcache_disable 声明重复，保持代码原状。
+  */
 void arch_icache_enable(void);
 
 /**
- *
- * @brief Enable i-cache
- *
- * @see arch_dcache_disable
- */
+  * @brief  关闭数据缓存。
+  * @param  无。
+  * @retval 无。
+  * @note   仅缓存管理且存在架构缓存能力时声明；缓存脏数据处理及屏障要求须以架构实现为准。本头原有第二个 arch_dcache_disable 声明重复，保持代码原状。
+  */
 void arch_dcache_disable(void);
 
 /**
- *
- * @brief Write-back / Invalidate / Write-back + Invalidate all d-cache
- *
- * @see arch_dcache_all
- */
+  * @brief  对数据缓存的整个缓存执行维护操作。
+  * @param  op：[输入]缓存维护操作，表示写回、失效或两者组合，值由缓存接口定义。
+  * @retval 操作状态；具体错误码由所选架构实现规定，本头未列出统一枚举。
+  * @note   仅 CONFIG_CACHE_MANAGEMENT 和 CONFIG_HAS_ARCH_CACHE 同时启用；失效操作可能丢弃未写回数据，调用方须按共享内存协议使用。
+  */
 int arch_dcache_all(int op);
 
 /**
- *
- * @brief Write-back / Invalidate / Write-back + Invalidate d-cache lines
- *
- * @see arch_dcache_range
- */
+  * @brief  对数据缓存的指定地址区间执行维护操作。
+  * @param  addr：[输入/输出]目标缓存区域首址；size 非零时须对应有效内存，具体对齐要求由架构规定。
+  * @param  size：[输入]区域大小，单位字节。
+  * @param  op：[输入]缓存维护操作，表示写回、失效或两者组合，值由缓存接口定义。
+  * @retval 操作状态；具体错误码由所选架构实现规定，本头未列出统一枚举。
+  * @note   仅 CONFIG_CACHE_MANAGEMENT 和 CONFIG_HAS_ARCH_CACHE 同时启用；失效操作可能丢弃未写回数据，调用方须按共享内存协议使用。
+  */
 int arch_dcache_range(void *addr, size_t size, int op);
 
 /**
- *
- * @brief Write-back / Invalidate / Write-back + Invalidate all i-cache
- *
- * @see arch_icache_all
- */
+  * @brief  对指令缓存的整个缓存执行维护操作。
+  * @param  op：[输入]缓存维护操作，表示写回、失效或两者组合，值由缓存接口定义。
+  * @retval 操作状态；具体错误码由所选架构实现规定，本头未列出统一枚举。
+  * @note   仅 CONFIG_CACHE_MANAGEMENT 和 CONFIG_HAS_ARCH_CACHE 同时启用；失效操作可能丢弃未写回数据，调用方须按共享内存协议使用。
+  */
 int arch_icache_all(int op);
 
 /**
- *
- * @brief Write-back / Invalidate / Write-back + Invalidate i-cache lines
- *
- * @see arch_icache_range
- */
+  * @brief  对指令缓存的指定地址区间执行维护操作。
+  * @param  addr：[输入/输出]目标缓存区域首址；size 非零时须对应有效内存，具体对齐要求由架构规定。
+  * @param  size：[输入]区域大小，单位字节。
+  * @param  op：[输入]缓存维护操作，表示写回、失效或两者组合，值由缓存接口定义。
+  * @retval 操作状态；具体错误码由所选架构实现规定，本头未列出统一枚举。
+  * @note   仅 CONFIG_CACHE_MANAGEMENT 和 CONFIG_HAS_ARCH_CACHE 同时启用；失效操作可能丢弃未写回数据，调用方须按共享内存协议使用。
+  */
 int arch_icache_range(void *addr, size_t size, int op);
 
 #ifdef CONFIG_DCACHE_LINE_SIZE_DETECT
+
 /**
- *
- * @brief Get d-cache line size
- *
- * @see sys_cache_data_line_size_get
- */
+  * @brief  取得数据缓存行大小。
+  * @param  无。
+  * @retval 缓存行大小，单位字节。
+  * @note   仅对应 CONFIG_DCACHE_LINE_SIZE_DETECT 或 CONFIG_ICACHE_LINE_SIZE_DETECT 配置；供地址区间对齐计算使用。
+  */
 size_t arch_dcache_line_size_get(void);
-#endif /* CONFIG_DCACHE_LINE_SIZE_DETECT */
+#endif    /* CONFIG_DCACHE_LINE_SIZE_DETECT 条件或包含保护结束。 */
 
 #ifdef CONFIG_ICACHE_LINE_SIZE_DETECT
-/**
- *
- * @brief Get i-cache line size
- *
- * @see sys_cache_instr_line_size_get
- */
-size_t arch_icache_line_size_get(void);
-#endif /* CONFIG_ICACHE_LINE_SIZE_DETECT */
 
-#endif /* CONFIG_CACHE_MANAGEMENT && CONFIG_HAS_ARCH_CACHE */
+/**
+  * @brief  取得指令缓存行大小。
+  * @param  无。
+  * @retval 缓存行大小，单位字节。
+  * @note   仅对应 CONFIG_DCACHE_LINE_SIZE_DETECT 或 CONFIG_ICACHE_LINE_SIZE_DETECT 配置；供地址区间对齐计算使用。
+  */
+size_t arch_icache_line_size_get(void);
+#endif    /* CONFIG_ICACHE_LINE_SIZE_DETECT 条件或包含保护结束。 */
+
+#endif    /* CONFIG_CACHE_MANAGEMENT && CONFIG_HAS_ARCH_CACHE 条件或包含保护结束。 */
 
 /** @} */
 
 #ifdef CONFIG_TIMING_FUNCTIONS
+/* 仅性能计时配置需要 timing_t 类型，与系统 tick 不是同一单位。 */
 #include <timing/types.h>
 
 /**
@@ -937,142 +707,126 @@ size_t arch_icache_line_size_get(void);
  */
 
 /**
- * @brief Initialize the timing subsystem.
- *
- * Perform the necessary steps to initialize the timing subsystem.
- *
- * @see timing_init()
- */
+  * @brief  初始化性能计时设施。
+  * @param  无。
+  * @retval 无。
+  * @note   仅 CONFIG_TIMING_FUNCTIONS 配置，具体计数器和频率由架构实现决定。
+  */
 void arch_timing_init(void);
 
 /**
- * @brief Signal the start of the timing information gathering.
- *
- * Signal to the timing subsystem that timing information
- * will be gathered from this point forward.
- *
- * @see timing_start()
- */
+  * @brief  开始采集性能计时信息。
+  * @param  无。
+  * @retval 无。
+  * @note   仅 CONFIG_TIMING_FUNCTIONS 配置，具体计数器和频率由架构实现决定。
+  */
 void arch_timing_start(void);
 
 /**
- * @brief Signal the end of the timing information gathering.
- *
- * Signal to the timing subsystem that timing information
- * is no longer being gathered from this point forward.
- *
- * @see timing_stop()
- */
+  * @brief  停止采集性能计时信息。
+  * @param  无。
+  * @retval 无。
+  * @note   仅 CONFIG_TIMING_FUNCTIONS 配置，具体计数器和频率由架构实现决定。
+  */
 void arch_timing_stop(void);
 
 /**
- * @brief Return timing counter.
- *
- * @return Timing counter.
- *
- * @see timing_counter_get()
- */
+  * @brief  读取性能计时计数器。
+  * @param  无。
+  * @retval 当前计数器的原始 timing_t 值。
+  * @note   先完成计时初始化；原始值未必直接等于 CPU 周期数，应经 timing_cycles_get 处理。
+  */
 timing_t arch_timing_counter_get(void);
 
 /**
- * @brief Get number of cycles between @p start and @p end.
- *
- * For some architectures or SoCs, the raw numbers from counter
- * need to be scaled to obtain actual number of cycles.
- *
- * @param start Pointer to counter at start of a measured execution.
- * @param end Pointer to counter at stop of a measured execution.
- * @return Number of cycles between start and end.
- *
- * @see timing_cycles_get()
- */
+  * @brief  计算开始和结束计数之间的周期数。
+  * @param  start：[输入]有效开始计数地址，不可为空，至少一个 timing_t。
+  * @param  end：[输入]有效结束计数地址，不可为空，至少一个 timing_t。
+  * @retval 经过架构缩放后的周期差。
+  * @note   部分平台原始计数须缩放，回绕和测量区间限制由架构实现决定；volatile 只约束访问，不提供线程同步。
+  */
 uint64_t arch_timing_cycles_get(volatile timing_t *const start,
 				volatile timing_t *const end);
 
 /**
- * @brief Get frequency of counter used (in Hz).
- *
- * @return Frequency of counter used for timing in Hz.
- *
- * @see timing_freq_get()
- */
+  * @brief  取得性能计时器频率。
+  * @param  无。
+  * @retval 频率，单位 Hz。
+  * @note   仅计时配置；应使用该频率换算对应计数器，不假定等于系统 tick 频率。
+  */
 uint64_t arch_timing_freq_get(void);
 
 /**
- * @brief Convert number of @p cycles into nanoseconds.
- *
- * @param cycles Number of cycles
- * @return Converted time value
- *
- * @see timing_cycles_to_ns()
- */
+  * @brief  将性能计时周期数换算成纳秒。
+  * @param  cycles：[输入]周期数量，来源应与该计时器一致。
+  * @retval 换算后的纳秒数。
+  * @note   整数舍入、溢出范围由架构实现规定；先完成计时初始化。
+  */
 uint64_t arch_timing_cycles_to_ns(uint64_t cycles);
 
 /**
- * @brief Convert number of @p cycles into nanoseconds with averaging.
- *
- * @param cycles Number of cycles
- * @param count Times of accumulated cycles to average over
- * @return Converted time value
- *
- * @see timing_cycles_to_ns_avg()
- */
+  * @brief  将累计周期数换算成每次测量的平均纳秒数。
+  * @param  cycles：[输入]多次测量累计周期数。
+  * @param  count：[输入]累计测量次数，必须大于 0。
+  * @retval 每次测量的平均时间，单位纳秒。
+  * @note   整数结果可能截断小数；计时源须与本架构接口一致。
+  */
 uint64_t arch_timing_cycles_to_ns_avg(uint64_t cycles, uint32_t count);
 
 /**
- * @brief Get frequency of counter used (in MHz).
- *
- * @return Frequency of counter used for timing in MHz.
- *
- * @see timing_freq_get_mhz()
- */
+  * @brief  取得性能计时器频率。
+  * @param  无。
+  * @retval 频率，单位 MHz。
+  * @note   仅计时配置；应使用该频率换算对应计数器，不假定等于系统 tick 频率。
+  */
 uint32_t arch_timing_freq_get_mhz(void);
 
 /** @} */
 
-#endif /* CONFIG_TIMING_FUNCTIONS */
+#endif    /* CONFIG_TIMING_FUNCTIONS 条件或包含保护结束。 */
 
 #ifdef CONFIG_PCIE_MSI_MULTI_VECTOR
 
+/* PCIe MSI 向量前置声明；具体结构由对应平台提供。 */
 struct msi_vector;
+/* MSI 向量结构的类型别名，不分配向量对象。 */
 typedef struct msi_vector msi_vector_t;
 
 /**
- * @brief Allocate vector(s) for the endpoint MSI message(s).
- *
- * @param priority the MSI vectors base interrupt priority
- * @param vectors an array to fill with allocated MSI vectors
- * @param n_vector the size of MSI vectors array
- *
- * @return The number of allocated MSI vectors
- */
+  * @brief  为 PCIe 端点分配 MSI 中断向量。
+  * @param  priority：[输入]MSI 向量的基准中断优先级。
+  * @param  vectors：[输出]可写向量数组，容量至少 n_vector 项；非零申请时不可为空。
+  * @param  n_vector：[输入]数组容量及申请向量数，单位项。
+  * @retval 实际分配的向量数量。
+  * @note   仅 CONFIG_PCIE_MSI_MULTI_VECTOR 配置；MSI 是由设备消息触发的中断，当前 ARM SPI 路径不使用此接口。
+  */
 uint8_t arch_pcie_msi_vectors_allocate(unsigned int priority,
 				       msi_vector_t *vectors,
 				       uint8_t n_vector);
 
 /**
- * @brief Connect an MSI vector to the given routine
- *
- * @param vector The MSI vector to connect to
- * @param routine Interrupt service routine
- * @param parameter ISR parameter
- * @param flags Arch-specific IRQ configuration flag
- *
- * @return True on success, false otherwise
- */
+  * @brief  把分配的 MSI 向量连接到中断处理函数。
+  * @param  vector：[输入/输出]有效 MSI 向量对象，不可为空。
+  * @param  routine：[输入]有效服务回调，不可为空。
+  * @param  parameter：[输入]传给回调的上下文，可为空，使用期间保持有效。
+  * @param  flags：[输入]架构中断配置标志。
+  * @retval true 表示成功，false 表示失败。
+  * @note   仅 PCIe 多向量配置；回调运行于中断上下文。
+  */
 bool arch_pcie_msi_vector_connect(msi_vector_t *vector,
 				  void (*routine)(const void *parameter),
 				  const void *parameter,
 				  uint32_t flags);
 
-#endif /* CONFIG_PCIE_MSI_MULTI_VECTOR */
+#endif    /* CONFIG_PCIE_MSI_MULTI_VECTOR 条件或包含保护结束。 */
 
 #ifdef __cplusplus
 }
-#endif /* __cplusplus */
+#endif    /* __cplusplus 条件或包含保护结束。 */
 
+/* 在所有所需类型声明完成后补入架构内联实现，避免声明和定义顺序循环。 */
 #include <arch/arch_inlines.h>
 
-#endif /* _ASMLANGUAGE */
+#endif    /* _ASMLANGUAGE 条件或包含保护结束。 */
 
-#endif /* ZEPHYR_INCLUDE_SYS_ARCH_INTERFACE_H_ */
+#endif    /* ZEPHYR_INCLUDE_SYS_ARCH_INTERFACE_H_ 条件或包含保护结束。 */

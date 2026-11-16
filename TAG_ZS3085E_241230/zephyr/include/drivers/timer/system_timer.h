@@ -7,13 +7,13 @@
 
 /**
  * @file
- * @brief Timer driver API
+ * @brief 系统定时器驱动与内核之间的接口。
  *
- * Declare API implemented by system timer driver and used by kernel components.
+ * 驱动提供硬件计数/下一事件，内核接收tick推进；接口声明不代表所有驱动均完整实现可选动作。
  */
 
 #ifndef ZEPHYR_INCLUDE_DRIVERS_SYSTEM_TIMER_H_
-#define ZEPHYR_INCLUDE_DRIVERS_SYSTEM_TIMER_H_
+#define ZEPHYR_INCLUDE_DRIVERS_SYSTEM_TIMER_H_    /* 避免重复展开接口声明。 */
 
 #include <stdbool.h>
 #include <device.h>
@@ -24,110 +24,60 @@ extern "C" {
 #endif
 
 /**
- * @brief Clock APIs
- * @defgroup clock_apis Clock APIs
+ * @brief 系统时钟接口
+ * @defgroup clock_apis 系统时钟接口
  * @{
  */
 
 /**
- * @brief Initialize system clock driver
- *
- * The system clock is a Zephyr device created globally.  This is its
- * initialization callback.  It is a weak symbol that will be
- * implemented as a noop if undefined in the clock driver.
- */
+  * @brief  初始化系统时钟设备。
+  * @param  dev：[输入] 启动框架提供的时钟设备指针，具体可空性由驱动实现决定。
+  * @retval 通常0成功，非零为驱动初始化错误；当前Actions实现固定0。
+  * @note   是时钟设备初始化回调；框架可提供弱空实现，实际硬件行为以选中驱动为准。
+  */
 extern int sys_clock_driver_init(const struct device *dev);
 
 /**
- * @brief Initialize system clock driver
- *
- * The system clock is a Zephyr device created globally.  This is its
- * device control callback, used in a few devices for power
- * management.  It is a weak symbol that will be implemented as a noop
- * if undefined in the clock driver.
- */
+  * @brief  声明旧式系统时钟电源控制回调。
+  * @param  dev：[输入] 有效时钟设备对象。
+  * @param  state：[输入] 请求的旧式电源状态。
+  * @retval 0通常表示完成，其他状态由对应实现约定。
+  * @note   此声明沿用pm_device_state；当前Actions实际入口名为sys_clock_device_ctrl并接收pm_device_action，不能把本声明当作它的定义。
+  */
 extern int clock_device_ctrl(const struct device *dev,
 			     enum pm_device_state state);
 
 /**
- * @brief Set system clock timeout
- *
- * Informs the system clock driver that the next needed call to
- * sys_clock_announce() will not be until the specified number of ticks
- * from the the current time have elapsed.  Note that spurious calls
- * to sys_clock_announce() are allowed (i.e. it's legal to announce
- * every tick and implement this function as a noop), the requirement
- * is that one tick announcement should occur within one tick BEFORE
- * the specified expiration (that is, passing ticks==1 means "announce
- * the next tick", this convention was chosen to match legacy usage).
- * Similarly a ticks value of zero (or even negative) is legal and
- * treated identically: it simply indicates the kernel would like the
- * next tick announcement as soon as possible.
- *
- * Note that ticks can also be passed the special value K_TICKS_FOREVER,
- * indicating that no future timer interrupts are expected or required
- * and that the system is permitted to enter an indefinite sleep even
- * if this could cause rollover of the internal counter (i.e. the
- * system uptime counter is allowed to be wrong
- *
- * Note also that it is conventional for the kernel to pass INT_MAX
- * for ticks if it wants to preserve the uptime tick count but doesn't
- * have a specific event to await.  The intent here is that the driver
- * will schedule any needed timeout as far into the future as
- * possible.  For the specific case of INT_MAX, the next call to
- * sys_clock_announce() may occur at any point in the future, not just
- * at INT_MAX ticks.  But the correspondence between the announced
- * ticks and real-world time must be correct.
- *
- * A final note about SMP: note that the call to sys_clock_set_timeout()
- * is made on any CPU, and reflects the next timeout desired globally.
- * The resulting calls(s) to sys_clock_announce() must be properly
- * serialized by the driver such that a given tick is announced
- * exactly once across the system.  The kernel does not (cannot,
- * really) attempt to serialize things by "assigning" timeouts to
- * specific CPUs.
- *
- * @param ticks Timeout in tick units
- * @param idle Hint to the driver that the system is about to enter
- *        the idle state immediately after setting the timeout
- */
+  * @brief  通知驱动最迟需要报告下一次tick的时间预算。
+  * @param  ticks：[输入] 相对tick数；0/负值通用契约表示尽快，K_TICKS_FOREVER表示不要求未来事件，INT_MAX可用于尽量远期且保留正确计时。
+  * @param  idle：[输入] 设置后是否即将空闲的提示。
+  * @retval 无。
+  * @note   允许驱动提前或多次报告；正常预算应在到期前一个tick内上报。SMP可从任意CPU调用，驱动须避免重复报告同一tick。具体Actions驱动对负值的处理有限，见其实现。
+  */
 extern void sys_clock_set_timeout(int32_t ticks, bool idle);
 
 /**
- * @brief Timer idle exit notification
- *
- * This notifies the timer driver that the system is exiting the idle
- * and allows it to do whatever bookkeeping is needed to restore timer
- * operation and compute elapsed ticks.
- *
- * @note Legacy timer drivers also use this opportunity to call back
- * into sys_clock_announce() to notify the kernel of expired ticks.
- * This is allowed for compatibility, but not recommended.  The kernel
- * will figure that out on its own.
- */
+  * @brief  通知定时器驱动系统正在退出空闲。
+  * @param  无。
+  * @retval 无。
+  * @note   驱动可据此恢复计数与更新内部状态；旧驱动可补报tick，当前Actions实现为空。
+  */
 extern void sys_clock_idle_exit(void);
 
 /**
- * @brief Announce time progress to the kernel
- *
- * Informs the kernel that the specified number of ticks have elapsed
- * since the last call to sys_clock_announce() (or system startup for
- * the first call).  The timer driver is expected to delivery these
- * announcements as close as practical (subject to hardware and
- * latency limitations) to tick boundaries.
- *
- * @param ticks Elapsed time, in ticks
- */
+  * @brief  向内核报告自上次报告后经过的完整tick。
+  * @param  ticks：[输入] 新经过的tick数，不是硬件cycle；首次调用相对系统启动。
+  * @retval 无。
+  * @note   通常从定时器中断调用，尽可能接近tick边界；内核在此推进超时队列并执行到期回调，驱动须确保上报串行。
+  */
 extern void sys_clock_announce(int32_t ticks);
 
 /**
- * @brief Ticks elapsed since last sys_clock_announce() call
- *
- * Queries the clock driver for the current time elapsed since the
- * last call to sys_clock_announce() was made.  The kernel will call
- * this with appropriate locking, the driver needs only provide an
- * instantaneous answer.
- */
+  * @brief  查询自最近一次报告后已经经过但尚未报告的完整tick。
+  * @param  无。
+  * @retval 未报告的完整tick数；周期驱动可返回0。
+  * @note   内核按接口约定提供适当同步，驱动返回瞬时读数；Actions实现另用自身锁保护累计值。
+  */
 extern uint32_t sys_clock_elapsed(void);
 /**
  * @}
@@ -137,4 +87,4 @@ extern uint32_t sys_clock_elapsed(void);
 }
 #endif
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_SYSTEM_TIMER_H_ */
+#endif    /* ZEPHYR_INCLUDE_DRIVERS_SYSTEM_TIMER_H_ */
