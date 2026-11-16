@@ -21,6 +21,10 @@ LOG_MODULE_REGISTER(spi_acts);    /* 注册SPI驱动日志模块，级别由CONF
 #include <drivers/dma.h>
 #include <soc.h>
 #include <board_cfg.h>
+
+/* 诊断打印预算：只输出前若干条，之后静默；
+ * 打印带宽在 5 ms 级帧周期下会压过收发本身，导致从机来不及预装下一帧。 */
+static volatile uint32_t s_spi2_diag_budget = 40;
 /* 控制/状态位编码；字段位置来自本驱动寄存器定义，不可套用 STM32 的 SPI_SR/SPI_CR1。 */
 #define SPI_CTL_CLK_SEL_MASK		(0x1 << 31)            /* CPU/DMA 访问时钟选择：字段掩码，数值按原实现保留。 */
 #define SPI_CTL_CLK_SEL_CPU			(0x0 << 31)    /* CPU/DMA 访问时钟选择：选择 CPU 路径。 */
@@ -576,9 +580,10 @@ static int spi_acts_write_read_data_by_cpu(struct acts_spi_controller *spi,
             return -ETIMEDOUT;                                                                                    /* 超时必须返回错误，不能把未完成的传输当作成功。 */
 		}
     }
-    if (slave) {                                                                                                  /* 从机测试额外输出预装和完成数量信息。 */
+    if (slave && s_spi2_diag_budget) {                                                                                                  /* 从机测试额外输出预装和完成数量信息。 */
         LOG_INF("SPI slave diag-v2: pre_sta=0x%x loaded_sta=0x%x tx=%d rx=%d",                                    /* 输出装载状态和实际收发字节数。 */
                 preload_before, preload_after, tx_len, rx_len);                                                   /* 打印预装前后状态及 TX/RX 完成数量。 */
+            s_spi2_diag_budget--;                                                                                  /* 消耗一条打印预算，预算耗尽后本处静默。 */
     }
     return 0;                                                                                                     /* 本路径按接口约定返回0；DMA双向旧实现即使出错也固定返回此值，详见函数头。 */
 }
@@ -699,16 +704,22 @@ int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_da
                 }
             }
         }
+        if (s_spi2_diag_budget) {
         LOG_INF("SPI2 slave diag-v2: ret=%d ctl=0x%x sta=0x%x bc=0x%x",                                               /* 输出本次驱动结果及控制器状态快照。 */
                 ret, spi->ctrl, spi->status, spi->bc);                                                                /* 打印返回码、控制、状态和字节计数寄存器。 */
+            s_spi2_diag_budget--;
+        }
         if (!ret && (spi->status & SPI_STATUS_ERR_MASK)) {                                                            /* 即使收发数量达到目标，也不能忽略硬件错误标志。 */
             ret = -EIO;                                                                                               /* 把硬件错误转换为驱动 I/O 错误。 */
         }
 
 #if defined(CONFIG_SOC_SERIES_LEOPARD)                                                                                /* 以下 GPIO 寄存器检查只适用于 LEOPARD SoC。 */
+        if (s_spi2_diag_budget) {
         LOG_INF("SPI2 pins after: 57=%x 58=%x 59=%x 60=%x",                                                           /* 打印传输结束后的四个 SPI2 引脚复用状态。 */
                 sys_read32(GPION_CTL(57)), sys_read32(GPION_CTL(58)),                                                 /* 读取片选与时钟引脚的配置寄存器。 */
                 sys_read32(GPION_CTL(59)), sys_read32(GPION_CTL(60)));                                                /* 读取 MISO 与 MOSI 引脚的配置寄存器。 */
+            s_spi2_diag_budget--;
+        }
 #endif                                                                                                                /* 结束当前条件编译分支。 */
         spi->ctrl &= ~(SPI_CTL_WR_MODE_MASK | SPI_CTL_RX_FIFO_EN |                                                    /* 关闭读写模式和接收 FIFO。 */
                        SPI_CTL_TX_FIFO_EN);                                                                           /* 同时关闭发送 FIFO，结束本次从机请求。 */
@@ -885,10 +896,16 @@ int transceive(const struct device *dev,
         SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE) {                    /* 进一步限定为从机模式，其他 SPI 用法走原逻辑。 */
         /* 每次 SPI2 CPU 从机请求都重建硬件状态并清除配置缓存。
          * 引脚只读诊断，不在此覆盖可能属于其他模块的复用配置。 */
+        if (s_spi2_diag_budget) {
         LOG_INF("SPI2 diag-v2 before: ctl=0x%x sta=0x%x", spi->ctrl, spi->status);    /* 保存复位前的控制器快照，辅助排查残留状态。 */
+            s_spi2_diag_budget--;
+        }
+        if (s_spi2_diag_budget) {
         LOG_INF("SPI2 pins before: 57=%x 58=%x 59=%x 60=%x",                          /* 记录复位前四个 SPI2 引脚的复用设置。 */
                 sys_read32(GPION_CTL(57)), sys_read32(GPION_CTL(58)),                 /* 读取片选与时钟引脚的配置寄存器。 */
                 sys_read32(GPION_CTL(59)), sys_read32(GPION_CTL(60)));                /* 读取 MISO 与 MOSI 引脚的配置寄存器。 */
+            s_spi2_diag_budget--;
+        }
         acts_reset_peripheral(cfg->reset_id);                                         /* 复位外设，丢弃残留状态，准备后续重新配置。 */
         data->ctx.config = NULL;                                                      /* 取消配置缓存，强制本次请求按当前参数配置。 */
     }

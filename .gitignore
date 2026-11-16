@@ -23,5 +23,7 @@ __pycache__/
 *.py[cod]
 *.before_*
 *.bak_nomotor
+# 改驱动/框架前保留的原文件副本（本地备份用，不入库）
+*.bak_before_*
 
 # ---- 注：.elf / .bin / .a / .lib / .FW 均为 SDK 预编译工具或库，务必入库，不要忽略 ----
