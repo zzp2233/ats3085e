@@ -1998,6 +1998,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(acts_app_cmds,                                   
     SHELL_CMD(spi2file, NULL, "Send a local file at 4 MHz <source path> <destination basename>", shell_spi2file),
     SHELL_CMD(spi2filetest, NULL, "Send generated data <1..10000 blocks> <destination basename> [bad block index]", shell_spi2filetest),
     SHELL_CMD(spi2ram, NULL, "Benchmark SPI to UMA503 RAM at 4 MHz <1..10000 blocks> [bad block index]", shell_spi2ram),
+    SHELL_CMD(spi2deliver, NULL, "8 MHz RAM delivery <bytes> <hold_ms> [bad block index]", shell_spi2deliver),
     SHELL_CMD(spi2rampair, NULL, "UMA503 RAM <1..10000 blocks> [bad block index] [--hz 100000..8000000] (default 4000000)", shell_spi2rampair),
 #endif
     SHELL_CMD(spi2swapready, NULL, "V7 READY GPIO61 [1..10000 count] [0..1000 gap_ms] [100000..8000000 Hz]", shell_spi2swapready),

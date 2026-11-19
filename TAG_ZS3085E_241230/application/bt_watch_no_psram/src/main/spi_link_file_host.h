@@ -9,13 +9,17 @@
 
 struct sfile_sender {
     const struct device *dev;
-    struct fs_file_t *source;
+    int (*read_block)(void *context, uint32_t index, uint8_t *data,
+                      unsigned int len, bool repair);
+    void *source;
     uint32_t tid, size, crc, transfers, resent, groups, bad_block;
     uint32_t last_index, peak_index, peak_ready_us;
     uint64_t ready_us, data_ready_us;
     uint16_t request;
     uint8_t last_type, peak_type;
     unsigned int pairs;
+    uint32_t hold_ms;
+    bool delivery;
     bool link_failed, repaired_bad_block, paired, half_pair;
 };
 
@@ -68,20 +72,21 @@ static bool sfile_ack_matches(const struct sfile_sender *x, uint8_t command,
 
 /* The peer switches to two credits after these exact three single blocks.
  * On an ambiguous reply, quarantine the link instead of guessing its mode. */
-static int sfile_pair_begin(struct sfile_sender *x)
+static int sfile_pair_begin(struct sfile_sender *x, uint8_t command,
+                            const uint8_t *body, unsigned int len)
 {
     unsigned int i;
     uint16_t request = ++x->request;
     int ret;
 
-    sfile_put32(s_swap_tx + SFILE_HEADER, x->size);
+    memcpy(s_swap_tx + SFILE_HEADER, body, len);
     for (i = 0; i < 3; ++i) {
-        sfile_frame(s_swap_tx, SFILE_MASTER, i ? SFILE_QUERY : SFILE_START_PAIR,
-                    x->tid, 0, request, i ? 0 : 4);
+        sfile_frame(s_swap_tx, SFILE_MASTER, i ? SFILE_QUERY : command,
+                    x->tid, 0, request, i ? 0 : len);
         ret = sfile_exchange(x);
         if (ret) return ret;
     }
-    if (!sfile_ack_matches(x, SFILE_START_PAIR, 0, request)) {
+    if (!sfile_ack_matches(x, command, 0, request)) {
         x->link_failed = true;
         return -EBADMSG;
     }
@@ -94,7 +99,9 @@ static int sfile_control(struct sfile_sender *x, uint8_t command, uint32_t index
                          const uint8_t *body, unsigned int len)
 {
     uint32_t start = k_uptime_get_32();
-    uint32_t timeout = command == SFILE_FINISH ? 120000u : 2000u;
+    bool delivery_group = x->delivery && command == SFILE_GROUP_END;
+    uint32_t timeout = command == SFILE_FINISH ? 120000u :
+                       (delivery_group ? 20000u : 2000u);
     uint16_t request;
     unsigned int i = 0;
     bool verifying = false;
@@ -110,9 +117,11 @@ static int sfile_control(struct sfile_sender *x, uint8_t command, uint32_t index
         if (ret) return ret;
         if (!x->half_pair && sfile_ack_matches(x, command, index, request)) {
             ret = s_swap_rx[SFILE_HEADER + 1];
-            if (command != SFILE_FINISH || ret != SFILE_BUSY) return ret;
+            if (ret != SFILE_BUSY || (command != SFILE_FINISH && !delivery_group))
+                return ret;
             verifying = true;
         }
+        if (delivery_group && verifying && !x->half_pair) k_msleep(20);
     } while (x->half_pair || (uint32_t)(k_uptime_get_32() - start) < timeout);
     return -ETIMEDOUT;
 }
@@ -124,21 +133,35 @@ static int sfile_end_pair(struct sfile_sender *x)
     return sfile_exchange(x);
 }
 
+static int sfile_read_generated(void *context, uint32_t index, uint8_t *data,
+                                unsigned int len, bool repair)
+{
+    unsigned int i;
+    (void)context;
+    (void)repair;
+    for (i = 0; i < len; ++i)
+        data[i] = (uint8_t)(index ^ (index >> 8) ^ (i * 29u));
+    return 0;
+}
+
+static int sfile_read_file(void *context, uint32_t index, uint8_t *data,
+                           unsigned int len, bool repair)
+{
+    struct fs_file_t *file = context;
+    if (repair && fs_seek(file, index * SFILE_DATA_BYTES, FS_SEEK_SET)) return -EIO;
+    return fs_read(file, data, len) == (ssize_t)len ? 0 : -EIO;
+}
+
 static int sfile_send_data(struct sfile_sender *x, uint32_t index, bool repair)
 {
     uint32_t offset = index * SFILE_DATA_BYTES;
     unsigned int len = x->size - offset;
     uint8_t *data = s_swap_tx + SFILE_HEADER;
+    int ret;
     if (len > SFILE_DATA_BYTES) len = SFILE_DATA_BYTES;
-    if (x->source) {
-        if (repair && fs_seek(x->source, offset, FS_SEEK_SET)) return -EIO;
-        if (fs_read(x->source, data, len) != (ssize_t)len) return -EIO;
-    } else {
-        unsigned int i;
-        for (i = 0; i < len; ++i)
-            data[i] = (uint8_t)(index ^ (index >> 8) ^ (i * 29u));
-        if (repair && index == x->bad_block) x->repaired_bad_block = true;
-    }
+    ret = x->read_block(x->source, index, data, len, repair);
+    if (ret) return ret;
+    if (!x->source && repair && index == x->bad_block) x->repaired_bad_block = true;
     if (!repair) x->crc = sfile_crc32(x->crc, data, len);
     else ++x->resent;
     sfile_frame(s_swap_tx, SFILE_MASTER, SFILE_DATA, x->tid, index, 0, len);
@@ -195,6 +218,9 @@ static int sfile_run(const struct shell *sh, struct sfile_sender x, const char *
     uint8_t params[4 + SFILE_NAME_MAX];
     uint32_t start, elapsed;
     size_t name_len = name ? strlen(name) : 0;
+    unsigned int param_len = 4u + name_len;
+    uint8_t start_command = x.delivery ? SFILE_START_DELIVERY :
+                            (pair ? SFILE_START_PAIR : (name ? SFILE_START : SFILE_START_RAM));
     int ret, wire_status = SFILE_OK, end_ret;
     bool opened = false, finish_sent = false;
 
@@ -220,9 +246,12 @@ static int sfile_run(const struct shell *sh, struct sfile_sender x, const char *
     memset(s_swap_tx, 0, SWAP_BLOCK_SIZE);
     sfile_put32(params, x.size);
     if (name_len) memcpy(params + 4, name, name_len);
-    if (pair && !x.paired) ret = sfile_pair_begin(&x);
-    else ret = sfile_control(&x, pair ? SFILE_START_PAIR : (name ? SFILE_START : SFILE_START_RAM),
-                             0, params, 4u + name_len);
+    if (x.delivery) {
+        sfile_put32(params + 4, x.hold_ms);
+        param_len = 8;
+    }
+    if (pair && !x.paired) ret = sfile_pair_begin(&x, start_command, params, param_len);
+    else ret = sfile_control(&x, start_command, 0, params, param_len);
     if (!ret) ret = sfile_send_body(&x);
     if (!ret && !x.source && x.bad_block != UINT32_MAX && !x.repaired_bad_block)
         ret = -EBADMSG;
@@ -284,7 +313,7 @@ unlock:
 static int shell_spi2file(const struct shell *sh, size_t argc, char *argv[])
 {
     struct fs_file_t source;
-    struct sfile_sender x = { .source = &source };
+    struct sfile_sender x = { .read_block = sfile_read_file, .source = &source };
     off_t size;
     int ret;
     if (argc != 3) return -EINVAL;
@@ -308,7 +337,7 @@ static int shell_spi2file(const struct shell *sh, size_t argc, char *argv[])
 static int sfile_run_generated(const struct shell *sh, const char *blocks_arg,
                                const char *bad_arg, const char *name, bool pair, uint32_t hz)
 {
-    struct sfile_sender x = { .bad_block = UINT32_MAX };
+    struct sfile_sender x = { .read_block = sfile_read_generated, .bad_block = UINT32_MAX };
     unsigned long blocks, bad;
     char *end;
     if (blocks_arg[0] < '0' || blocks_arg[0] > '9') return -EINVAL;
@@ -352,6 +381,33 @@ static int shell_spi2rampair(const struct shell *sh, size_t argc, char *argv[])
     if (argc != 2 && argc != 3) return -EINVAL;
     return sfile_run_generated(sh, argv[1], argc == 3 ? argv[2] : NULL, NULL, true,
                                (uint32_t)hz);
+}
+
+static int shell_spi2deliver(const struct shell *sh, size_t argc, char *argv[])
+{
+    struct sfile_sender x = {
+        .read_block = sfile_read_generated, .bad_block = UINT32_MAX, .delivery = true,
+    };
+    unsigned long size, hold_ms, bad;
+    char *end;
+
+    if (argc != 3 && argc != 4) return -EINVAL;
+    if (argv[1][0] < '0' || argv[1][0] > '9' || argv[2][0] < '0' || argv[2][0] > '9')
+        return -EINVAL;
+    size = strtoul(argv[1], &end, 10);
+    if (*end || !size || size > 10000u * SFILE_DATA_BYTES) return -EINVAL;
+    hold_ms = strtoul(argv[2], &end, 10);
+    if (*end || hold_ms > SFILE_DELIVERY_MAX_HOLD_MS) return -EINVAL;
+    if (argc == 4) {
+        if (argv[3][0] < '0' || argv[3][0] > '9') return -EINVAL;
+        bad = strtoul(argv[3], &end, 10);
+        if (*end || bad >= (size + SFILE_DATA_BYTES - 1u) / SFILE_DATA_BYTES)
+            return -EINVAL;
+        x.bad_block = (uint32_t)bad;
+    }
+    x.size = (uint32_t)size;
+    x.hold_ms = (uint32_t)hold_ms;
+    return sfile_run(sh, x, NULL, true, 8000000u);
 }
 
 #endif

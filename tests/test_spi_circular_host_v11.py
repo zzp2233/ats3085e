@@ -13,7 +13,8 @@ STUBS=r'''
 static uint8_t circular_reply[2][512];
 uint32_t opens,closes,open_error,close_error,session_active,opened_hz;
 uint32_t file_mode,file_first,file_blocks,file_expected_crc,file_bad,file_repaired,file_finished,fs_calls;
-uint32_t file_ram_started;
+uint32_t file_ram_started, file_delivery_busy, file_delivery_queries;
+static bool file_delivery_mode;
 uint32_t file_pairs;
 static unsigned int file_pair_arm, file_half;
 static bool file_paired;
@@ -28,29 +29,44 @@ static void file_peer(const uint8_t *tx, uint8_t *slot) {
   unsigned int b=index-file_first;
   if(b>=SFILE_GROUP || index>=file_blocks) {++invariant_error;return;}
   if(!sfile_valid(tx,SFILE_MASTER)) {++file_bad;file_bad_index=index;return;}
-  for(i=0;i<SFILE_DATA_BYTES;++i)
+  if(file_delivery_busy)++invariant_error;
+  for(i=0;i<swap_u16(tx+14);++i)
    if(tx[SFILE_HEADER+i]!=(uint8_t)(index^(index>>8)^(i*29u)))++invariant_error;
   if(file_bad && index==file_bad_index)++file_repaired;
   file_seen[b/8u]|=1u<<(b%8u);
   return;
  }
  if(!sfile_valid(tx,SFILE_MASTER)) {++invariant_error;return;}
- if(cmd==SFILE_QUERY) {memcpy(slot,file_reply,512);return;}
+ if(cmd==SFILE_QUERY) {
+  if(file_delivery_busy) {
+   ++file_delivery_queries;
+   if(!--file_delivery_busy) {
+    file_first+=sfile_group_count(file_blocks,file_first);
+    memset(file_seen,0,SFILE_BITMAP);
+    file_reply[SFILE_HEADER+1]=SFILE_OK;
+    sfile_frame(file_reply,SFILE_SLAVE,SFILE_ACK,sfile_u32(tx+4),index,swap_u16(tx+12),SFILE_ACK_BYTES);
+   }
+  }
+  memcpy(slot,file_reply,512);return;
+ }
  memset(file_reply+SFILE_HEADER,0,SFILE_ACK_BYTES);
- if(cmd==SFILE_START || cmd==SFILE_START_RAM || cmd==SFILE_START_PAIR) {
-  file_blocks=sfile_u32(tx+SFILE_HEADER)/SFILE_DATA_BYTES;
+ if(cmd==SFILE_START || cmd==SFILE_START_RAM || cmd==SFILE_START_PAIR || cmd==SFILE_START_DELIVERY) {
+  file_delivery_mode=cmd==SFILE_START_DELIVERY;
+  file_blocks=(sfile_u32(tx+SFILE_HEADER)+SFILE_DATA_BYTES-1)/SFILE_DATA_BYTES;
   if(cmd!=SFILE_START) {
    ++file_ram_started;
-   if(swap_u16(tx+14)!=4)++invariant_error;
+   if(swap_u16(tx+14)!=(cmd==SFILE_START_DELIVERY ? 8 : 4))++invariant_error;
   }
-  if(cmd==SFILE_START_PAIR && !file_paired)file_pair_arm=3;
+  if((cmd==SFILE_START_PAIR || cmd==SFILE_START_DELIVERY) && !file_paired)file_pair_arm=3;
  }
  if(cmd==SFILE_GROUP_END) {
   unsigned int count=sfile_group_count(file_blocks,file_first);
   if(index!=file_first)++invariant_error;
   for(i=0;i<count;++i)if(!sfile_bit(file_seen,i))status=SFILE_MISSING;
   if(status==SFILE_MISSING)memcpy(file_reply+SFILE_HEADER+2,file_seen,SFILE_BITMAP);
-  else {file_first+=count;memset(file_seen,0,SFILE_BITMAP);}
+  else if (file_delivery_mode) {
+   status=SFILE_BUSY;file_delivery_busy=6;
+  } else {file_first+=count;memset(file_seen,0,SFILE_BITMAP);}
  }
  if(cmd==SFILE_FINISH) {
   if(file_first!=file_blocks || sfile_u32(tx+SFILE_HEADER)!=file_expected_crc)status=SFILE_CHECKSUM;
@@ -140,6 +156,11 @@ int probe_pair_rate(void) {
  if (!arg_gap[0]) {a[2]=a[3];a[3]=a[4];}
  return shell_spi2rampair(&shell,arg_gap[0]?5:4,a);
 }
+int probe_delivery(void) {
+ char *a[]={"spi2deliver",arg_count,"11000",arg_gap};
+ file_mode=1;
+ return shell_spi2deliver(&shell,arg_gap[0]?4:3,a);
+}
 int probe_pair_missing_rate(void) {
  char *a[]={"spi2rampair",arg_count,"--hz"};
  return shell_spi2rampair(&shell,3,a);
@@ -147,7 +168,7 @@ int probe_pair_missing_rate(void) {
 int probe_circle(void) {char *a[]={"spi2circ",arg_count,arg_gap,arg_hz};return shell_spi2circ(&shell,4,a);}
 '''
 class Model(old.Model):
-    def call(self,name='probe_circle'):return super().call(name)
+    def call(self,name='probe_circle'):return super().call(name, instruction_limit=30000000)
 
 class HostTests(unittest.TestCase):
     def setUp(self):self.m=Model()
@@ -165,6 +186,17 @@ class HostTests(unittest.TestCase):
         self.assertEqual(m.get('fs_calls'),0)
         self.assertEqual(m.get('file_ready_timeout_ms'),2000)
         self.assertEqual(m.get('invariant_error'),0)
+    def test_delivery_waits_for_busy_and_resends_tail(self):
+        m = Model()
+        m.arg('arg_count', 48001); m.arg('arg_gap', '100')
+        data = bytes((b ^ (i * 29)) & 255 for b in range(100) for i in range(480)) + bytes((100,))
+        m.set('file_expected_crc', zlib.crc32(data))
+        self.assertEqual(m.call('probe_delivery'), 0)
+        self.assertEqual(m.get('file_delivery_queries'), 12)
+        self.assertEqual(m.get('file_repaired'), 1)
+        self.assertEqual(m.get('file_finished'), 1)
+        self.assertEqual(m.get('invariant_error'), 0)
+
     def test_pair_rate_and_legacy_default(self):
         for request, bad, expected in [(None, '', 4000000), (100000, '', 100000),
                                        (4000000, '0', 4000000), (8000000, '', 8000000),

@@ -132,10 +132,10 @@ class Model:
     def arg(self, name, value):
         self.uc.mem_write(self.sym[name], str(value).encode() + b'\0')
 
-    def call(self, name='probe_block'):
+    def call(self, name='probe_block', instruction_limit=10000000):
         self.uc.reg_write(UC_ARM_REG_SP, 0x2000f000)
         self.uc.reg_write(UC_ARM_REG_LR, 0x110001)
-        self.uc.emu_start(self.sym[name] | 1, 0x110000, count=10000000)
+        self.uc.emu_start(self.sym[name] | 1, 0x110000, count=instruction_limit)
         value = self.uc.reg_read(UC_ARM_REG_R0)
         return value - 2**32 if value & 2**31 else value
 
