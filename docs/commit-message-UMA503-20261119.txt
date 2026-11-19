@@ -1,0 +1,128 @@
+修改项：SSP2 从机提速 V5～V11：DMA 硬件描述符环、READY 令牌、双样本打包 PIO、CRC 查表迁 RAM 与文件接收
+
+一、问题定位（先说清为什么动这些文件）
+- 基线 7075901（PIO 从机跑通 256B v3）。本轮四个定位点：
+  1) PIO 供数到顶：预装 14B 是 PL022 FIFO 可靠上限（写满 16 丢最早 2 字节），
+     传输期按空槽回填，CPU 一旦被 UI/射频抢占即 TX 见底、MISO 插填充值；
+     打包 PIO 一次 DATAR 写搬两个 8 位样本、预装 14→28B 后 350kHz 档仍偶发
+     欠载——CPU 供数窗口决定结果，必须换 DMA。
+  2) 启动顺序缺陷：app_main_entry 里 spi_link_test_start() 先于
+     hw_timer_tick_start() 执行，V10 唤醒探测定时器依赖的计时服务
+     还没就绪，唤醒链路取不到 tick。
+  3) 固定间隔与重装窗口：主机固定等 10ms 观测不到从机"检查→处理→下一帧
+     重装"窗口是否关闭，V5 复现整帧漏收（主机事务数比从机有效计数多 1、
+     bad 恒为 0——从机只统计已收帧，整帧漏收不可见）、V6 在 seq=204 前后
+     RX 缓冲已是新帧而 TX 仍是旧应答。需要从机武装完成后翻转 GPIO50
+     发 READY 令牌，替代固定间隔。
+  4) 每帧 CPU 重装 DMA 太贵且 8MHz 下 TX 供数不及时：V11 前每块完成后由
+     软件重装；8MHz 注错波形（1333.bin）显示第 110 笔 IDLE 的 MISO 前
+     256B 之后插入六个 00、末六字节被挤出，同轮从机报 TX 欠载——
+     DMA 请求门限太晚，50MHz 采样数出 512B 应有 4,096 个 SCK 上升沿，
+     时钟数正确而供数不足，定位为 TX 请求门限而非时钟问题。
+- 另：XIP 取指是热点。4MHz 段内时钟正常但 CPU 校验拉长块间隔，
+  CRC 函数与查表在 Flash 上执行时 300 块仅 108,597 B/s。
+
+二、分文件改动（改了什么、为什么）
+1) startup/app_release/app_main/app_main.c
+- spi_link_test_start() 移到 hw_timer_tick_start() 之后：
+  计时服务必须先于使用它的 SPI 任务启动。
+2) startup/app_release/config/common/app_linkscript_single_sim_xip.ld
+- .data 内新增收编 .spi_crc.text/.spi_crc.rodata/.spi_dma.text 三个输入段：
+  OpenCPU 由 SDK 在进应用前整体载入初始化数据段，借此把 CRC 查表与
+  DMA 热代码放 RAM，摆脱 XIP 取指瓶颈。实测 4MHz 300 块
+  108,597 → 247,848（CRC 迁移）→ 317,880 B/s（DMA 快照/边界判断迁移）。
+3) startup/app_release/demo/demo_spi.c
+- 启动打印改为 slave/dma_validation/dma_audit_only 三态；
+  LINK_DMA_AUDIT_ONLY 时 SDK init 后停 SSP、核对方向位并跑只读审计；
+  LINK_DMA_VALIDATION 时直接进入 spi_link_dma_slave_run() 或
+  spi_link_dma_circular_run()，失败挂起任务提示重启。
+- PIO 路径保留：新增 spi_link_slave_fifo_init() 探测 FPCKE 打包位——
+  试写 0x005a00a5/0x00c3003c 用两次写入区分 STATUS 按 FIFO 项还是按
+  8 位样本计数，回读不符则退回单样本模式；spi_link_pio_feed() 按
+  samples_per_write 组装 DATAR 写入（§17.4.1 低半字样本先上总线）。
+- PIO 服务加 4 项配额（LINK_PIO_SERVICE_QUOTA）：单侧最多服务 4 个 FIFO
+  项即复查另一侧水位，防单侧饿死。
+- 坏帧诊断升级：SPI_FIFO_TRACE 记录首个"需继续供数但 TX FIFO 已空"窗口的
+  帧号/已取/已写/STATUS 快照，故障点留在内存待会话空闲再报告；区分
+  重复、跳号（seq_err）、发送入队不足（tx_short）与帧尾残留（tx_left）。
+- GPIO53 波形标记（spi_link_trace_gpio_init）：模组 23 脚 MAIN_RTS→
+  ASR1605 GPIO53，仅限三线 UART、流控关闭且该脚只接分析仪的调试配置；
+  AF 回读不符即恢复原复用并降级为串口汇报，给逻辑分析仪提供电平翻转标记。
+4) demo/spi_link_swap.h
+- swap_crc 由逐位运算改为 256 项按字节查表（每字节一次查表），线上
+  CRC16 定义与结果不变；新增 SPI_LINK_CRC_CODE/SPI_LINK_CRC_TABLE 弱默认宏，
+  由 demo_spi.c 定义为 __attribute__((section(".spi_crc.text"))) 等以配合
+  链接脚本落 RAM。协议注释修正：V5 保持 v3 布局，503 DMA 不使用 SWAP_PRELOAD。
+5) 新增 demo/spi_link_dma_config.h
+- 编译开关总控：LINK_DMA_VALIDATION=1（DMA 验证固件，默认）、
+  LINK_DMA_AUDIT_ONLY（复现 V2 只读审计）、LINK_DMA_CIRCULAR（V11 环形，
+  默认随 VALIDATION）；双 0 恢复保留的 PIO 路径；环形必须配专用 DMA 从机构建。
+6) 新增 demo/spi_link_dma_audit.h
+- Phase A 只读所有权审计：不申请通道、不提交 DMA，仅读 dma_SSP.h 寄存器
+  比对 SDK init 前后；64B 对齐候选缓冲只作地址论证——空闲硬件不等于
+  归本应用所有，先审计再动手。
+7) 新增 demo/spi_link_dma_slave.h
+- V10 DMA 从机主体：512B 块含两个独立 256B v3 帧；静态保留 SDK 固定
+  TX29/RX30 请求对（req61/60）并做冲突检查，静态预留不是全局分配器；
+  cache 维护采用 SDK 反汇编证据（CPUCleanDCacheLine=dsb+mcr c7,c10,1、
+  Invalidate 用 c7,c6,1；本 SDK VirtualToPhysical 为 bx lr），
+  不链接私有 CP 地址与额外 modem 库；禁止音频/PCM/其他 SSP2 客户端并发。
+8) 新增 demo/spi_link_dma_circular.h
+- V11 硬件描述符环（ASR1605 §11.3.2/11.3.5）：TX/RX 各 A→B→A 描述符，
+  描述符按 64B 步长隔离 cache 行，数据区前后各留 64B 守卫；清 RUN 与
+  NODESCFETCH、设 DDADR 再置 RUN；TX 预取下一槽故确认延迟两块，
+  READY 每块恰好授权一个块，不做推测 ACK；CPU 只读完成 RX 槽（先
+  invalidate）、只写可归还 TX 槽（写完 clean）。
+9) 新增 demo/spi_link_ready.h
+- V7 READY 令牌：GPIO50（模组 66 脚/I2C_SDA，AF0，专用验证固件独占，
+  禁止 I2C 客户端占用）；故障时保持令牌不变——强制拉低可能在上一令牌
+  为高时虚假授权一笔传输，恢复手段是双板重启。
+10) 新增 demo/spi_link_wake.h
+- V10 唤醒策略：500µs 活动探测定时器 + HISR 信号量通知 SPI 任务，
+  不挂私有 DMA IRQ 钩子；定时器/HISR 回调不等待、不打印、不写外设寄存器，
+  CRC/cache/重装仍留在 SPI 任务。
+11) 新增 demo/spi_link_diag.h
+- V10 粗粒度诊断：基于 OSA tick（1 tick=5ms），SDK um_hw_timer_tick_get
+  计数的是回调次数不是硬件墙钟，明确定位 tick 级停顿而非亚 tick 延迟；
+  ISR/HISR 只发布 32 位戳，64 位累计仅在 SPI 任务；诊断不参与 DMA
+  权限与超时判定。
+12) 新增 demo/spi_link_circular_profile.h
+- V11 任务内分段计时：CP15 PMU cycle 计数（isb+mrc），不改定时器、
+  PMU 配置与 DMA 所有权，用于拆 READY 空档与各阶段热点。
+13) 新增 demo/spi_link_block.h / spi_link_file_protocol.h / spi_link_file_slave.h
+  / spi_link_crc32_fast.h
+- block 与 file_protocol 与 ATS 端逐字节一致（V10 双帧块、SPI FILE V1
+  16B 头/480B 数据/100 块组/13B 位图 ACK/CRC32）；file_slave 写
+  spi_link.part 暂存、组位图定位坏块、整份 CRC32 校验；crc32_fast 为
+  反射 CRC-32/ISO-HDLC（0xedb88320）4×256 切片查表。
+14) docs/ 与 tests/
+- V11/V11A 复盘与 ATS 仓库各存一份；tests/ 4 个 Python 串口自动化回归
+  （DMA 从机、V11、打包与一键检查）。
+
+三、验证命令
+- 烧录本固件后 COM6 确认 `SPI LINK slave=1 dma_validation=1 …`、
+  V11 需 `SPI11 DESC_MEMTEST PASS` 与 `SPI DMA READY v11 circular`；
+  主机侧再发 spi2swapdma / spi2swapready / spi2swapblock2 / spi2circ /
+  spi2rampair（详见 ATS 仓库提交说明第三节）。
+- 判据：从机块数增量 = N+2、bad=0、starts=1/rearm=0；PIO/审计路径看
+  SLAVE RUN 汇总 ok/bad/tx_min 与首次穿底 trace。
+
+四、验证结果
+- 打包 PIO：预装 14→28B，350kHz 档仍偶发欠载（供数到顶的直接证据）。
+- V6（先修从机重装）：首批 19 轮 37,252 次确认、37,271 笔事务闭合；
+  随后复现 seq=204 溢出（推动 READY 握手）。
+- V7 起 READY 令牌：V9A 1/10/1,000/10,000 次全通过；V10 2.4MB
+  5,001 笔确认 5,000 块、40.715s。
+- V11 硬件环：V11A+V11 4MHz 六轮通过，5,000 块长测 63,106/63,066 B/s，
+  V11B 91,757 B/s（5,000 块 26.156s，双端事务增量均 5,002，
+  starts=1/rearm=0 为环运行的必要证据）。
+- 热点迁 RAM：4MHz 300 块 108,597→247,848→317,880 B/s 三阶段；
+  4MHz 29 轮×3,000 块共 41.76MB 零重传，中位约 331.0 kB/s。
+- 8MHz：TX 请求门限从剩 16 项提前到剩 23 项（tft=22、threshold=23、
+  burst=8，提前约 7µs）后，注错连续 10 轮只补预设坏块一次；正常长测
+  24 轮×3,000 块共 34.56MB、720 组，零重传零失败，各轮 CRC32=7eb2f066，
+  吞吐 510.5~522.1 kB/s。
+- V11A 配套回归 185 项通过（其中从机环 19、从机旧路径 86）。
+- 边界（未证明/不能外推）：OSA tick 为 5ms 粒度，只能定位 tick 级停顿，
+  亚 tick 延迟需 GPIO53/GPIO61 波形；8MHz 结论对应约 5cm 接线与当时的
+  RAM 消费方式；READY 故障保持令牌不变，恢复手段是双板重启。

@@ -9,6 +9,7 @@
  * @file Leopard 外设时钟门控、父时钟选择与分频实现。
  */
 
+#include <errno.h>
 #include <kernel.h>
 #include <device.h>
 #include <soc.h>
@@ -429,8 +430,72 @@ static void __acts_clk_set_rate_spi_ck64m(int clock_id, unsigned int rate_hz)
 
 #endif
 
+/* ATS3085E 手册 §10.4.3.9：SPI2 时钟源在 [9:8]，分频在 [3:0]。
+ * 本路径使用 HOSC（源编码 0），保留位 [7:4] 不参与分频。 */
+#define SPI2_CLK_SRC_MASK    (3u << 8)
+#define SPI2_CLK_DIV_MASK    0x0fu
+#define SPI2_HOSC_HZ        (CONFIG_HOSC_CLK_MHZ * 1000000u)
+
 /**
-  * @brief  选择 HOSC 或 COREPLL 并配置 SPI0～3 分频。
+  * @brief  把 SPI2 的四位编码换算为分频倍数的两倍。
+  * @param  code：[输入]分频编码 0～15。
+  * @retval 2～28；编码 14、15 分别返回 3、5，避免浮点运算。
+  * @note   调用方须先从寄存器屏蔽出 [3:0]，或按 0～15 枚举。
+  */
+static uint32_t spi2_div_twice(uint32_t code)
+{
+    if (code < 14u) {
+        return 2u * (code + 1u);    /* 编码 0～13 对应整数 ÷1～÷14。 */
+    }
+    return code == 14u ? 3u : 5u;    /* 特殊编码对应 ÷1.5、÷2.5。 */
+}
+
+/**
+  * @brief  使用 HOSC 配置不超过请求频率的最快 SPI2 分频档。
+  * @param  rate_hz：[输入]请求的 SPI2 频率，单位 Hz。
+  * @retval 0：字段回读一致；-ERANGE：低于最慢档；-EIO：源或分频字段回读不符。
+  * @note   由 SPI 驱动在获取总线锁后、拉低片选前调用；仅改 SPI2 时钟源和分频字段。
+  */
+static int acts_clk_set_rate_spi2(uint32_t rate_hz)
+{
+    const uint32_t fields = SPI2_CLK_SRC_MASK | SPI2_CLK_DIV_MASK;
+    uint32_t best_code = 0u;   /* 选中的硬件编码，初值在找到候选前无效。 */
+    uint32_t best_div2 = 0u;   /* 零表示没有分频档满足请求。 */
+    uint32_t reg, readback;    /* 原寄存器、配置回读值。 */
+
+    /* 直接比较分数，避免整数舍入令实际输出略高于请求上限。 */
+    for (uint32_t code = 0u; code <= SPI2_CLK_DIV_MASK; ++code) {
+        uint32_t div2 = spi2_div_twice(code);
+
+        if ((uint64_t)rate_hz * div2 >= 2u * SPI2_HOSC_HZ &&
+            (!best_div2 || div2 < best_div2)) {
+            best_code = code;
+            best_div2 = div2;
+        }
+    }
+    if (!best_div2) {
+        printk("SPI2: request %u Hz unsupported; HOSC minimum request %u Hz (div14)\n",
+               rate_hz, ((SPI2_HOSC_HZ + 13u) / 14u));
+        return -ERANGE;
+    }
+
+    /* 只写手册定义字段；读取源和分频编码核对硬件是否接受配置。 */
+    reg = sys_read32(CMU_SPI2CLK);
+    sys_write32((reg & ~fields) | best_code, CMU_SPI2CLK);
+    readback = sys_read32(CMU_SPI2CLK);
+    if ((readback & fields) != best_code) {
+        printk("SPI2: clock readback mismatch, expected fields 0x%x, CMU_SPI2CLK=0x%x\n",
+               best_code, readback);
+        return -EIO;
+    }
+
+    printk("SPI2: requested %u Hz, HOSC readback %u Hz, CMU_SPI2CLK=0x%x\n",
+           rate_hz, (2u * SPI2_HOSC_HZ) / spi2_div_twice(readback & SPI2_CLK_DIV_MASK), readback);
+    return 0;
+}
+
+/**
+  * @brief  沿用 SPI0、SPI1 和 SPI3 的 HOSC 或 COREPLL 分频路径。
   * @param  clock_id：[输入] CLOCK_ID_SPI0～CLOCK_ID_SPI3。
   * @param  rate_hz：[输入] 目标Hz，必须大于0。
   * @retval 无。
@@ -662,7 +727,7 @@ static void acts_clk_set_rate_jpeg(unsigned int rate_hz)
   * @brief  按外设时钟编号分派频率配置。
   * @param  clock_id：[输入] CLOCK_ID_* 编号；SPI0～3 对应普通 SPI 时钟。
   * @param  rate_hz：[输入] 目标频率，单位 Hz，分频计算要求大于0。
-  * @retval 固定返回0；包括不支持的编号，不能据此判断配置成功。
+  * @retval SPI2 返回配置状态；其他编号保留原有返回 0 的约定。
   * @note   实际频率由父时钟及分频编码决定；从机线上的 SCK 仍由外部主机提供。
   */
 int clk_set_rate(int clock_id,  uint32_t rate_hz)
@@ -676,9 +741,10 @@ int clk_set_rate(int clock_id,  uint32_t rate_hz)
 		break;                                                   /* 结束本分支，不落入后续case。 */
 	case CLOCK_ID_DMA:
 		break;                                                   /* 结束本分支，不落入后续case。 */
+	case CLOCK_ID_SPI2:
+		return acts_clk_set_rate_spi2(rate_hz);    /* 低频不可达或回读异常时向 SPI 请求返回错误。 */
 	case CLOCK_ID_SPI0:
 	case CLOCK_ID_SPI1:
-	case CLOCK_ID_SPI2:
 	case CLOCK_ID_SPI3:
 		acts_clk_set_rate_spi(clock_id, rate_hz);                /* 设置普通SPI源和分频。 */
 		break;                                                   /* 结束本分支，不落入后续case。 */
@@ -735,13 +801,13 @@ int clk_set_rate(int clock_id,  uint32_t rate_hz)
 
 	}
 
-	return 0;                                                        /* 原实现固定返回0，不反映局部ret或是否支持。 */
+	return 0;                                                        /* SPI2 在分支内返回实际状态，其他外设沿用此返回值。 */
 }
 
 /**
-  * @brief  保留外设频率查询接口。
+  * @brief  查询 HOSC 驱动的 SPI2 时钟。
   * @param  clock_id：[输入] 外设时钟编号。
-  * @retval 当前固定返回0 Hz，尚未实现实际频率读取。
+  * @retval SPI2 寄存器推算的 Hz；其他编号或非 HOSC 时为 0。
   */
 uint32_t clk_get_rate(int clock_id)
 {
@@ -751,9 +817,16 @@ uint32_t clk_get_rate(int clock_id)
 	case CLOCK_ID_SD0:
 	case CLOCK_ID_SD1:
 	case CLOCK_ID_DMA:
+	case CLOCK_ID_SPI2: {
+        uint32_t reg = sys_read32(CMU_SPI2CLK);    /* 读取实际字段，避免用请求频率冒充硬件配置。 */
+
+        if (reg & SPI2_CLK_SRC_MASK) {
+            return 0u;    /* 其他时钟源的频率没有通过本接口建模。 */
+        }
+        return (2u * SPI2_HOSC_HZ) / spi2_div_twice(reg & SPI2_CLK_DIV_MASK);
+    }
 	case CLOCK_ID_SPI0:
 	case CLOCK_ID_SPI1:
-	case CLOCK_ID_SPI2:
 	case CLOCK_ID_SPI3:
 	case CLOCK_ID_SPI0CACHE:
 	case CLOCK_ID_SPI1CACHE:

@@ -108,15 +108,15 @@ uint32_t clk_rate_get_corepll(void);
   * @brief  按外设时钟编号分派频率配置。
   * @param  clock_id：[输入] CLOCK_ID_* 编号；SPI0～3 对应普通 SPI 时钟。
   * @param  rate_hz：[输入] 目标频率，单位 Hz，分频计算要求大于0。
-  * @retval 固定返回0；包括不支持的编号，不能据此判断配置成功。
+  * @retval SPI2：0、-ERANGE 或 -EIO；其他外设保留原有返回约定。
   * @note   实际频率由父时钟及分频编码决定；从机线上的 SCK 仍由外部主机提供。
   */
 int clk_set_rate(int clock_id,  uint32_t rate_hz);
 
 /**
-  * @brief  保留外设频率查询接口。
+  * @brief  读取由 HOSC 驱动的 SPI2 时钟分频结果。
   * @param  clock_id：[输入] 外设时钟编号。
-  * @retval 当前固定返回0 Hz，尚未实现实际频率读取。
+  * @retval SPI2 分频回读结果，单位 Hz；非 HOSC 或其他外设返回 0。
   */
 uint32_t clk_get_rate(int clock_id);
 

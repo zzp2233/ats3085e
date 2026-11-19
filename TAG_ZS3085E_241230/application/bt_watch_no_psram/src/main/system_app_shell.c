@@ -21,9 +21,11 @@
 #include <drivers/i2c.h>
 #if IS_ENABLED(CONFIG_SPI_2)
 #include <drivers/spi.h>
-#include "spi_link_swap.h"    /* 新主机测试使用独立的延迟确认协议。 */
+#include "spi_link_block.h"    /* 新主机测试使用独立的延迟确认协议。 */
 #include <drivers/spi_acts_entry.h>    /* 独立于从机测试编译开关的主机入口检查。 */
 #include <sys_wakelock.h>             /* 检查期间禁止休眠覆盖 SPI2 引脚复用。 */
+#include <drivers/gpio.h>
+#include "spi_link_ready.h"
 #endif
 #if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)    /* 只为启用 SPI2 从机的固件编译测试命令。 */
 #include <drivers/spi.h>                                     /* Zephyr SPI 配置、缓冲区及传输接口。 */
@@ -48,44 +50,85 @@
 #ifdef CONFIG_SHELL
 
 #if IS_ENABLED(CONFIG_SPI_2)
-static uint8_t s_swap_tx[SWAP_SIZE];    /* 主机发送帧缓冲；v3 一帧 256 字节，放静态区。 */
-static uint8_t s_swap_rx[SWAP_SIZE];    /* 主机接收帧缓冲。 */
+static uint8_t s_swap_tx[SWAP_BLOCK_SIZE];    /* 静态缓冲支持旧 256 字节帧和 V10 的 512 字节双帧块。 */
+static uint8_t s_swap_rx[SWAP_BLOCK_SIZE];    /* 两种传输长度复用同一缓冲区。 */
+static bool s_swap_circular_used;
+
+/* 首发和重发共用同一时钟与段间节拍。 */
+static int spi2swap_transfer(const struct device *dev, const struct spi_config *config,
+                             const struct spi_buf_set *tx, const struct spi_buf_set *rx,
+                             bool gpio_clock, bool dma_mode, unsigned int burst_gap_us,
+                             unsigned int burst_bytes)
+{
+    if (dma_mode) {
+        return spi_acts_spi2_transceive_dma(dev, config, tx->buffers[0].buf,
+                                          rx->buffers[0].buf, tx->buffers[0].len);
+    }
+    if (gpio_clock) {
+        return spi_acts_spi2_gpio_transceive(dev, tx->buffers[0].buf, rx->buffers[0].buf,
+                                            SWAP_SIZE, config->frequency);
+    }
+    if (burst_gap_us) {
+        return spi_acts_spi2_transceive_paced(dev, config, tx, rx, burst_gap_us, burst_bytes);
+    }
+    return spi_transceive(dev, config, tx, rx);
+}
 /**
   * @brief  作为主机执行有界的整帧双向测试，最后额外发一帧取回末帧确认。
   * @param  sh：[输入]有效 Shell 对象，不可为空。
-  * @param  argc：[输入]命令参数数量，允许 0～3 个可选参数。
-  * @param  argv：[输入]Shell 字符串数组，依次为帧数 1～1000、帧间隔毫秒 0～1000、时钟 100000～26000000。
-  * @retval 0：所有请求均收到正确确认；-EINVAL：参数错误；-ENODEV：设备不存在；-EIO：校验失败；其他负值来自驱动。
+  * @param  argc：[输入]命令参数数量，硬件命令支持可选的段间停顿和段长。
+  * @param  argv：[输入]帧数、帧间隔 ms、时钟上限 Hz、可选硬件段间停顿 µs 和段长字节数。
+  * @param  gpio_clock：[输入]true 用 GPIO 产生低速时钟，false 使用硬件 SPI2。
+  * @retval 0：所有请求均收到正确确认；-EINVAL：参数错误；-ENODEV：设备不存在；-ERANGE：硬件分频不可达；-EIO：校验或时钟回读失败。
   * @note   先启动 503 并看到 SLAVE SWAP pre=len 再发命令，否则首帧会打在不存在的从机上。
-  *         占用 Shell 线程并持唤醒锁；单帧失败即停，v3 从机会自恢复，但本轮已中断。
+  *         占用 Shell 线程并持唤醒锁；确认错误最多重建两次流水，驱动错误立即退出。
   */
-static int shell_spi2swap(const struct shell *sh, size_t argc, char *argv[])
+static int spi2swap_run(const struct shell *sh, size_t argc, char *argv[], bool gpio_clock, bool dma_mode, bool ready_mode, bool block2)
 {
     static uint16_t sid;    /* 每次命令产生新的非零会话号，拒绝上一轮残留确认。 */
     /* 频率改为每次调用可覆盖，便于在同一次烧录里扫不同时钟，不必反复重编。 */
     struct spi_config config = {
-        .frequency = 812500,    /* 缺省沿用当前驱动实际分频约 800 kHz 的档位。 */
+        .frequency = ready_mode ? 4000000u : (gpio_clock ? 200000u : 2300000u),
         .operation = SPI_OP_MODE_MASTER | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8),
     };
     const struct device *dev;    /* 注册的 SPI2 实例。 */
-    uint8_t *tx = s_swap_tx;    /* 256 字节缓冲放静态区，避免压在本就紧张的 shell 线程栈上。 */
+    uint8_t *tx = s_swap_tx;    /* 最大 512 字节缓冲放静态区，避免增加 shell 线程栈负担。 */
     uint8_t *rx = s_swap_rx;    /* 接收缓冲同理。 */
-    struct spi_buf tb = { .buf = tx, .len = SWAP_SIZE };    /* 整帧长度直接用宏：tx 已是指针，不能再取 sizeof。 */
-    struct spi_buf rb = { .buf = rx, .len = SWAP_SIZE };    /* 收发等长，满足驱动的主机等长分支要求。 */
+    const unsigned int wire_bytes = block2 ? SWAP_BLOCK_SIZE : SWAP_SIZE;
+    const unsigned int payload_bytes = block2 ? SWAP_BLOCK_PAYLOAD : SWAP_SIZE - SWAP_HDR - SWAP_TAIL;
+    struct spi_buf tb = { .buf = tx, .len = wire_bytes };    /* 整帧长度直接用宏：tx 已是指针，不能再取 sizeof。 */
+    struct spi_buf rb = { .buf = rx, .len = wire_bytes };    /* 收发等长，满足驱动的主机等长分支要求。 */
     const struct spi_buf_set ts = { .buffers = &tb, .count = 1 };
     const struct spi_buf_set rs = { .buffers = &rb, .count = 1 };
     unsigned long count = 1;    /* 默认仅确认一个有效请求。 */
-    unsigned long gap_ms = SWAP_GAP_MS;    /* 缺省间隔，可用第三个参数覆盖。 */
-    unsigned long freq = 812500;    /* 缺省时钟，可用第四个参数覆盖。 */
-    unsigned int i, good = 0;    /* good 只统计收到对应确认的请求。 */
+    unsigned long burst_gap_us = 0;    /* 缺省连续送时钟，非零才启用硬件分段。 */
+    unsigned long burst_bytes = SPI_ACTS_SPI2_BURST_DEFAULT;    /* 延续已验证的 8 字节档。 */
+    unsigned long gap_ms = ready_mode ? 0u : (dma_mode ? 10u : SWAP_GAP_MS);
+    unsigned long freq = config.frequency;    /* 命令可用第四个参数覆盖请求频率。 */
+    unsigned int i, good = 0;         /* 按序通过 CRC 和会话检查的唯一确认数。 */
+    unsigned int attempts = 0;        /* 实际调用收发驱动的次数，包含同步、重发及失败调用。 */
+    unsigned int retries = 0;         /* 确认错误后重建流水的次数；每次可能增加两次实际事务。 */
+    uint32_t run_start_ms;            /* 统计窗起点，包含帧间隔及组帧、校验耗时。 */
+    uint32_t elapsed_ms, xfer_max_us = 0u;
+    uint64_t xfer_total_us = 0u;
+    uint64_t ready_total_us = 0u;
+    uint32_t ready_max_us = 0u;
     char *end;    /* 检查数值转换是否完整。 */
     int ret = 0;    /* 首个故障决定整轮结果。 */
 
+    static unsigned int ready_wire_bytes;
+    if (s_swap_circular_used) return -EPERM; /* V11 has different ACK latency. */
+    /* Keep transport size fixed while a READY token is live across commands. */
+    if (block2 && (!ready_mode || !dma_mode || gpio_clock)) return -EINVAL;
+    if (ready_mode && s_ready_used && ready_wire_bytes != wire_bytes) {
+        shell_error(sh, "SPI transport size mixing blocked; reboot BOTH boards");
+        return -EPERM;
+    }
     /* 参数检查必须先于硬件配置，不能因错误参数产生时钟。 */
-    if (argc > 4) return -EINVAL;
+    if (argc > ((gpio_clock || dma_mode) ? 4u : 6u)) return -EINVAL;
     if (argc >= 2) {
         count = strtoul(argv[1], &end, 10);
-        if (!argv[1][0] || *end || count < 1 || count > 1000) return -EINVAL;
+        if (!argv[1][0] || *end || count < 1 || count > (dma_mode ? 10000u : 1000u)) return -EINVAL;
     }
     if (argc >= 3) {
         gap_ms = strtoul(argv[2], &end, 10);
@@ -94,95 +137,243 @@ static int shell_spi2swap(const struct shell *sh, size_t argc, char *argv[])
     if (argc >= 4) {
         freq = strtoul(argv[3], &end, 10);
         if (!argv[3][0] || *end || freq < 100000 || freq > 26000000) return -EINVAL;
-        config.frequency = (uint32_t)freq;    /* 允许的档位由驱动分频表实际决定，日志会打印真实速率。 */
+        config.frequency = (uint32_t)freq;    /* 由驱动选择可达分频，日志区分请求和回读频率。 */
+    }
+    if (argc >= 5u) {
+        burst_gap_us = strtoul(argv[4], &end, 10);
+        if (!argv[4][0] || *end || burst_gap_us > 1000u) return -EINVAL;
+    }
+    if (argc == 6u) {
+        burst_bytes = strtoul(argv[5], &end, 10);
+        if (!argv[5][0] || *end || !burst_gap_us || burst_bytes < 2u ||
+            burst_bytes > SPI_ACTS_SPI2_BURST_MAX || (burst_bytes & 1u)) return -EINVAL;
+    }
+    if (gpio_clock && config.frequency > 400000u) return -EINVAL;
+    /* The 503 idle task can sleep one 5 ms tick. No READY wire exists, so
+     * V5 starts at 10 ms; sub-10-ms operation needs a separate handshake plan. */
+    if (dma_mode && ((!ready_mode && gap_ms < 10u) || config.frequency > 8000000u)) return -EINVAL;
+    /* A token is valid across commands. Mixing legacy traffic would consume
+     * untracked tokens; require a fresh boot instead of silently resyncing. */
+    if ((!ready_mode && s_ready_used) || (ready_mode && s_ready_legacy_used)) {
+        shell_error(sh, "SPI READY/legacy mixing blocked; reboot BOTH boards");
+        return -EPERM;
     }
     dev = device_get_binding(CONFIG_SPI_2_NAME);
     if (!dev) return -ENODEV;
+    sys_wake_lock(FULL_WAKE_LOCK);
+    if (ready_mode) {
+        ret = swap_ready_begin();
+        if (ret) {
+            shell_error(sh, "SPI READY init ret=%d gpio=61; check pin ownership or reboot BOTH boards after fault", ret);
+            sys_wake_unlock(FULL_WAKE_LOCK);
+            return ret;
+        }
+    }
+    if (ready_mode) ready_wire_bytes = wire_bytes;
     if (++sid == 0) ++sid;
-    shell_print(sh, "SPI SWAP start sid=%u count=%u gap_ms=%u freq=%u", sid,
-                (unsigned int)count, (unsigned int)gap_ms, (unsigned int)config.frequency);
+    shell_print(sh, "SPI SWAP start sid=%u count=%u gap_ms=%u freq=%u clock=%s burst_gap_us=%u burst_bytes=%u", sid,
+                (unsigned int)count, (unsigned int)gap_ms, (unsigned int)config.frequency,
+                gpio_clock ? "GPIO" : "SPI2", (unsigned int)burst_gap_us,
+                burst_gap_us ? (unsigned int)burst_bytes : 0u);
+    if (dma_mode) shell_print(sh, "SPI SPEED v%u path=DMA bytes=%u payload=%u retries=disabled",
+                             block2 ? 10u : (ready_mode ? 9u : 5u), wire_bytes, payload_bytes);
+    if (block2) shell_print(sh, "SPI10 BLOCK sid=%u target_blocks=%u logical_target=%u frames_per_block=2",
+                           sid, (unsigned int)count, (unsigned int)(count * 2u));
+    if (ready_mode) shell_print(sh, "SPI READY gpio=61 toggle=1 wake=both_edge_irq expected=%u timeout_ms=200 gap_ms=%u",
+                               (unsigned int)s_ready_expected, (unsigned int)gap_ms);
 
     /* 延迟确认流水：第 0 帧同步；第 1～count 帧分别验证前一请求。 */
-    sys_wake_lock(FULL_WAKE_LOCK);
-    k_msleep(gap_ms);
-    {
-    uint32_t t_all0 = k_uptime_get_32();      /* 整条命令的起点，用来算平均单帧耗时。 */
-    static uint8_t s_exp[SWAP_SIZE];          /* v10：按协议自行复算出的"从机应回帧"，用于逐字节定位坏点。 */
-    unsigned int retries = 0;                 /* v10：整轮累计重发次数，这才是真实的底层随机失败率。 */
+    if (gap_ms) k_msleep(gap_ms);
+    run_start_ms = k_uptime_get_32();
+    uint8_t *s_exp = tx; /* On failure, reuse TX after DMA has stopped. */
+    /* 仅在收到错误确认后覆盖 TX 生成期望数据，不另占一份静态缓冲。 */
     for (i = 0; i <= count; ++i) {
-        uint32_t t_x0 = k_uptime_get_32();    /* 本帧开始时刻（ms），用来量出 256 字节真正占多长墙上时间。 */
-        unsigned int tries = 0u;              /* 本帧已经重发过几次。 */
+        unsigned int tries = 0u;             /* 当前缺失确认已发起的恢复次数。 */
         int frame_ok = 0;                     /* 本帧最终是否拿到有效确认。 */
         for (;;) {
-            int chk;
-            swap_frame(tx, SWAP_MASTER, sid, (uint16_t)i);
-            memset(rx, 0xa5, SWAP_SIZE);    /* 用宏而不是 sizeof(rx)：rx 是指针。 */
-            ret = spi_transceive(dev, &config, &ts, &rs);
-            /* 这一行是判"到底谁慢"的唯一硬数据：从机侧帧窗有 35 ms，若这里只有 3 ms，
-             * 说明从机在传完之后还在空转；若这里就是十几毫秒，说明瓶颈在主机驱动，
-             * 从机的 CPU 抢不到根本不是主因。只打前 3 帧，避免灌爆串口。 */
-            if (tries == 0u && i < 3u) {
-                shell_print(sh, "SPI SWAP xfer=%u ms at transfer=%u", (unsigned int)(k_uptime_get_32() - t_x0), i);
+            int chk;    /* 从机应答的完整帧校验结果。 */
+            uint32_t xfer_start_ms, xfer_start_cycles, xfer_us;
+
+            /* 事务 i 返回的是请求 i-1 的确认。若 i 已被从机正确接收，
+             * 直接再发 i 只能读到 i 的确认。先重放 i-1，重新装入要等的确认。 */
+            if (tries) {
+                k_msleep(gap_ms);
+                swap_frame(tx, SWAP_MASTER, sid, (uint16_t)(i - 1u));
+                ++retries;
+                ++attempts;
+                ret = spi2swap_transfer(dev, &config, &ts, &rs, gpio_clock, dma_mode,
+                                        (unsigned int)burst_gap_us, (unsigned int)burst_bytes);
+                if (ret < 0) break;
+                k_msleep(gap_ms);
+            }
+
+            if (block2) swap_block_frame(tx, SWAP_MASTER, sid, (uint16_t)i);
+            else swap_frame(tx, SWAP_MASTER, sid, (uint16_t)i);
+            memset(rx, 0xa5, wire_bytes);    /* 用宏而不是 sizeof(rx)：rx 是指针。 */
+            if (ready_mode) {
+                uint32_t waited = 0u;
+                ret = swap_ready_wait(&waited);
+                ready_total_us += waited;
+                if (waited > ready_max_us) ready_max_us = waited;
+                if (ret) {
+                    shell_error(sh, "SPI READY wait fail transfer=%u expected=%u ret=%d; NO clocks issued for this transfer",
+                                i, (unsigned int)s_ready_expected, ret);
+                    break;
+                }
+                swap_ready_consume();
+            } else s_ready_legacy_used = true;
+            /* 只测驱动调用耗时，排除组帧、CRC 与串口输出。 */
+            xfer_start_ms = k_uptime_get_32();
+            xfer_start_cycles = k_cycle_get_32();
+            ++attempts;
+            ret = spi2swap_transfer(dev, &config, &ts, &rs, gpio_clock, dma_mode,
+                                        (unsigned int)burst_gap_us, (unsigned int)burst_bytes);
+            xfer_us = k_cyc_to_us_floor32(k_cycle_get_32() - xfer_start_cycles);
+            xfer_total_us += xfer_us;
+            if (xfer_us > xfer_max_us) xfer_max_us = xfer_us;
+            if (!dma_mode && tries == 0u && i < 3u) {
+                shell_print(sh, "SPI SWAP xfer=%u ms at transfer=%u",
+                            (unsigned int)(k_uptime_get_32() - xfer_start_ms), i);
             }
             if (ret < 0) break;             /* 驱动层报错，整轮立即终止。 */
-            chk = swap_check(rx, SWAP_SLAVE);
-            if (chk == 0 && (!i || (swap_u16(rx + 2) == sid && swap_u16(rx + 4) == (uint16_t)(i - 1)))) {
+            chk = block2 ? swap_block_check(rx, SWAP_SLAVE) : swap_check(rx, SWAP_SLAVE);
+            if (chk == 0 && (!i || (swap_u16(rx + 2) == sid &&
+                (block2 ? swap_block_sequence(rx) : swap_u16(rx + 4)) == (uint16_t)(i - 1)))) {
                 frame_ok = 1;               /* 整帧 CRC、头部 CRC、图案、会话与序号全部对上。 */
                 break;
             }
-            /* 第 0 帧天然不合格：从机必须在收到请求之前就预装 TX，只能拿开机时的默认
-             * sid=0/seq=FFFF 顶上，首帧回包必然是"旧头 + 新身"混合，CRC 不可能对上。
-             * 协议本来就把它当同步帧（后续帧才逐帧确认 seq=i-1），所以这里静默跳过、不重发。 */
-            if (i == 0u) break;
-            /* v10：把收到的帧和"按协议应回的帧"逐字节比对。第一个不同处就是坏字节的位置：
-             * first >= 254   -> 尾部被截，最后一个字节没赶上时钟；
-             * first 在 14..253 且 ndiff 很小 -> 帧中某个字节被破坏，属于中途穿底；
-             * ndiff = 256    -> 整帧对不上，根本没同步上。 */
+            /* 第 0 帧发送本轮首个请求，收到的预装数据不属于本轮的确认。 */
+            if (i == 0u && !dma_mode) break;
+
+            /* 检验失败时报告实际与期望的头字段，区分 CRC 损坏与正确帧的序号错位。 */
             {
-                unsigned int d, ndiff = 0u, first = SWAP_SIZE;
-                swap_frame(s_exp, SWAP_SLAVE, sid, (uint16_t)(i - 1));
-                for (d = 0u; d < SWAP_SIZE; ++d) {
+                unsigned int d, ndiff = 0u, first = wire_bytes;
+                if (block2) swap_block_frame(s_exp, SWAP_SLAVE, i ? sid : 0u, (uint16_t)(i - 1));
+                else swap_frame(s_exp, SWAP_SLAVE, i ? sid : 0u, (uint16_t)(i - 1));
+                for (d = 0u; d < wire_bytes; ++d) {
                     if (rx[d] != s_exp[d]) {
                         if (ndiff == 0u) first = d;
                         ++ndiff;
                     }
                 }
-                shell_error(sh, "SPI SWAP bad at transfer=%u chk=%d ndiff=%u/%u first=%u", i, chk, ndiff, SWAP_SIZE, first);
-                shell_hexdump(sh, rx + SWAP_SIZE - 16u, 16);    /* 尾部 16 字节，看是不是被截或变 0x00。 */
-                shell_hexdump(sh, s_exp + SWAP_SIZE - 16u, 16);  /* 同一位置的应有内容，直接对照。 */
+                shell_error(sh, "SPI SWAP bad transfer=%u chk=%d ack_sid=%u ack_seq=%u expected=%u ndiff=%u/%u first=%u",
+                            i, chk, (unsigned int)swap_u16(rx + 2), (unsigned int)swap_u16(rx + 4),
+                            (unsigned int)(uint16_t)(i - 1u), ndiff, wire_bytes, first);
+                shell_hexdump(sh, rx, 16);    /* 首部包含魔数、会话及序号，方便确认预装是否对齐。 */
+                shell_hexdump(sh, rx + wire_bytes - 16u, 16);    /* 尾部 16 字节，用于定位截断。 */
+                shell_hexdump(sh, s_exp + wire_bytes - 16u, 16);  /* 同一位置的应有内容，直接对照。 */
             }
-            /* 同一序号重发：从机对任何一个请求都无状态应答，重发不需要它做任何配合。
-             * 留 2 次余量，既不掩盖问题（次数会打印出来），又让长压测能跑完并量出失败率。 */
+            if (dma_mode) { ret = -EIO; break; }
+            /* 错误保留在汇总里；最多两次恢复，避免对端脱链时无限占用总线。 */
             if (tries >= 2u) {
                 shell_error(sh, "SPI SWAP invalid reply at transfer=%u after %u retries", i, tries);
                 ret = -EIO;
                 break;
             }
             ++tries;
-            ++retries;
-            k_msleep(gap_ms);
         }
         if (ret < 0) break;
         if (i == 0u) {
-            if (i < count) k_msleep(gap_ms);
+            if (i < count && gap_ms) k_msleep(gap_ms);
             continue;
         }
         if (!frame_ok) { ret = -EIO; break; }
         ++good;
-        if (i < count) k_msleep(gap_ms);
+        if (i < count && gap_ms) k_msleep(gap_ms);
     }
-    /* 整条命令的实测总耗时：除以帧数即为单帧墙上时间，用来反推真实 SCLK。 */
-    shell_print(sh, "SPI SWAP total=%u ms frames=%u retries=%u", (unsigned int)(k_uptime_get_32() - t_all0),
-                (unsigned int)(count + 1u), retries);
+    if (ready_mode && !ret) {
+        uint32_t waited = 0u;
+        ret = swap_ready_wait(&waited);
+        ready_total_us += waited;
+        if (waited > ready_max_us) ready_max_us = waited;
+        if (ret) shell_error(sh, "SPI READY final rearm fail expected=%u ret=%d", (unsigned int)s_ready_expected, ret);
+    }
+    /* 计划事务含一次流水填充，attempts 记录调用次数，即使提前退出也不会误报。 */
+    elapsed_ms = k_uptime_get_32() - run_start_ms;
+    shell_print(sh, "SPI SWAP total=%u ms target=%u planned=%u attempts=%u confirmed=%u retries=%u",
+                (unsigned int)elapsed_ms, (unsigned int)count,
+                (unsigned int)(count + 1u), attempts, good, retries);
+    if (dma_mode) {
+        shell_print(sh, "SPI SPEED v%u xfer_avg_us=%u xfer_max_us=%u confirmed_Bps=%u payload_Bps=%u",
+                    block2 ? 10u : (ready_mode ? 9u : 5u),
+                    attempts ? (unsigned int)(xfer_total_us / attempts) : 0u,
+                    (unsigned int)xfer_max_us,
+                    elapsed_ms ? (unsigned int)((uint64_t)good * wire_bytes * 1000u / elapsed_ms) : 0u,
+                    elapsed_ms ? (unsigned int)((uint64_t)good * payload_bytes * 1000u / elapsed_ms) : 0u);
+    }
+    if (block2) shell_print(sh, "SPI10 RESULT sid=%u ack_blocks=%u ack_logical=%u tx_blocks=%u",
+                           sid, good, good * 2u, attempts);
+    if (ready_mode) shell_print(sh, "SPI READY total_wait_us=%llu max_wait_us=%u pending_token=%u final_rearm=%s",
+                               (unsigned long long)ready_total_us, (unsigned int)ready_max_us,
+                               (unsigned int)s_ready_expected, ret ? "FAIL" : "OK");
+    if (ready_mode) shell_print(sh, "SPI WAKE v9 irq=%u blocks=%u blocked_us=%llu",
+                               (unsigned int)s_ready_irq_count, (unsigned int)s_ready_block_count,
+                               (unsigned long long)s_ready_block_us);
+    if (ready_mode) {
+        shell_print(sh, "SPI9 A sid=%u n=%u pre_us=%llu pre_max=%u", sid,
+                    (unsigned int)s_ready_diag.n, (unsigned long long)s_ready_diag.pre_us,
+                    (unsigned int)s_ready_diag.pre_max);
+        shell_print(sh, "SPI9 B sid=%u n=%u post_us=%llu post_max=%u", sid,
+                    (unsigned int)s_ready_diag.n, (unsigned long long)s_ready_diag.post_us,
+                    (unsigned int)s_ready_diag.post_max);
+        shell_print(sh, "SPI9 E sid=%u held=%u unpaired=%u", sid,
+                    (unsigned int)s_ready_diag.held, (unsigned int)s_ready_diag.unpaired);
     }
 
     /* 保留最后一帧的重新武装时间，便于随后再次执行命令。 */
-    k_msleep(gap_ms);
+    if (ready_mode) ret = swap_ready_end(ret);
+    else if (gap_ms) k_msleep(gap_ms);
     sys_wake_unlock(FULL_WAKE_LOCK);
     shell_print(sh, "SPI SWAP %s sid=%u good=%u/%u ret=%d", ret ? "FAIL" : "PASS",
                 sid, good, (unsigned int)count, ret);
     return ret;
 }
+
+/**
+  * @brief  执行原有硬件 SPI2 压测。
+  * @param  sh：[输入]有效 Shell 对象。
+  * @param  argc：[输入]参数数量，最多 4 项。
+  * @param  argv：[输入]参数数组，格式见 spi2swap_run。
+  * @retval 0：确认全部通过；负数：参数、驱动或帧校验错误。
+  * @note   复用共用会话入口，由其持有唤醒锁。
+  */
+static int shell_spi2swap(const struct shell *sh, size_t argc, char *argv[])
+{
+    return spi2swap_run(sh, argc, argv, false, false, false, false);
+}
+
+static int shell_spi2swapdma(const struct shell *sh, size_t argc, char *argv[])
+{
+    return spi2swap_run(sh, argc, argv, false, true, false, false);
+}
+
+static int shell_spi2swapready(const struct shell *sh, size_t argc, char *argv[])
+{
+    return spi2swap_run(sh, argc, argv, false, true, true, false);
+}
+
+/**
+  * @brief  执行 100～400 kHz GPIO 主机诊断，复用原协议。
+  * @param  sh：[输入]有效 Shell 对象。
+  * @param  argc：[输入]参数数量，最多 4 项。
+  * @param  argv：[输入]参数数组，格式见 spi2swap_run。
+  * @retval 0：确认全部通过；负数：参数、驱动或帧校验错误。
+  * @note   接线沿用 SPI2，每帧结束后恢复硬件 SPI2 复用。
+  */
+static int shell_spi2swapgpio(const struct shell *sh, size_t argc, char *argv[])
+{
+    return spi2swap_run(sh, argc, argv, true, false, false, false);
+}
+
+static int shell_spi2swapblock2(const struct shell *sh, size_t argc, char *argv[])
+{
+    return spi2swap_run(sh, argc, argv, false, true, true, true);
+}
+
+#include "spi_link_circular.h"
+#if IS_ENABLED(CONFIG_FILE_SYSTEM)
+#include "spi_link_file_host.h"
+#endif
 
 /**
   * @brief  手动检查 SPI2 主机空闲配置，不产生数据事务。
@@ -223,7 +414,7 @@ static int shell_spi2entry(const struct shell *sh, size_t argc, char *argv[])
 static int spi2test_run(const struct shell *sh, bool send_pattern)
 {
     static const struct spi_config config = {                                     /* 固定配置对象供同步 SPI 请求使用。 */
-        .frequency = 812500,                                                      /* 请求配置为 812.5 kHz；从机实际移位由外部时钟控制。 */
+        .frequency = 2300000,                                                      /* 配置 SPI2 内部时钟；从机实际移位由外部时钟控制。 */
         .operation = SPI_OP_MODE_SLAVE | SPI_MODE_CPOL | SPI_MODE_CPHA |          /* 选择从机、CPOL=1、CPHA=1，即 SPI Mode 3。 */
                      SPI_WORD_SET(8),                                             /* 每个 SPI 数据字为 8 位。 */
     };
@@ -306,7 +497,7 @@ static int shell_spi2stress(const struct shell *sh, size_t argc, char *argv[])
 {
     static uint16_t session;                                                                                    /* 跨多次 Shell 命令保留递增会话编号。 */
     static const struct spi_config config = {                                                                   /* 固定配置对象供同步 SPI 请求使用。 */
-        .frequency = 812500,                                                                                    /* 请求配置为 812.5 kHz；从机实际移位由外部时钟控制。 */
+        .frequency = 2300000,                                                                                    /* 配置 SPI2 内部时钟；从机实际移位由外部时钟控制。 */
         .operation = SPI_OP_MODE_SLAVE | SPI_MODE_CPOL | SPI_MODE_CPHA |                                        /* 选择从机、CPOL=1、CPHA=1，即 SPI Mode 3。 */
                      SPI_WORD_SET(8),                                                                           /* 每个 SPI 数据字为 8 位。 */
     };
@@ -1799,7 +1990,18 @@ static int shell_at2get(const struct shell *sh, size_t argc, char *argv[])
 #endif                                                                                                           /* CONFIG_UART_2 */
 SHELL_STATIC_SUBCMD_SET_CREATE(acts_app_cmds,                                                                    /* 创建静态子命令表，SPI、UART及其他诊断共用app根入口。 */
 #if IS_ENABLED(CONFIG_SPI_2)
-    SHELL_CMD(spi2swap, NULL, "master CRC test [1..1000], default 1; UMA slave required", shell_spi2swap),    /* 有界双向测试。 */
+    SHELL_CMD(spi2swap, NULL, "SPI2 [count] [gap_ms] [Hz] [burst_gap_us] [burst_bytes]", shell_spi2swap),
+    SHELL_CMD(spi2swapdma, NULL, "V5 DMA [1..10000 count] [10..1000 gap_ms] [100000..8000000 Hz]", shell_spi2swapdma),
+    SHELL_CMD(spi2swapblock2, NULL, "V10 512B/2 frames [1..10000 blocks] [0..1000 gap_ms] [100000..8000000 Hz]", shell_spi2swapblock2),
+    SHELL_CMD(spi2circ, NULL, "V11 hardware RX ring/2-block ACK [1..10000 blocks] [0..1000 gap_ms] [100000..8000000 Hz]", shell_spi2circ),
+#if IS_ENABLED(CONFIG_FILE_SYSTEM)
+    SHELL_CMD(spi2file, NULL, "Send a local file at 4 MHz <source path> <destination basename>", shell_spi2file),
+    SHELL_CMD(spi2filetest, NULL, "Send generated data <1..10000 blocks> <destination basename> [bad block index]", shell_spi2filetest),
+    SHELL_CMD(spi2ram, NULL, "Benchmark SPI to UMA503 RAM at 4 MHz <1..10000 blocks> [bad block index]", shell_spi2ram),
+    SHELL_CMD(spi2rampair, NULL, "UMA503 RAM <1..10000 blocks> [bad block index] [--hz 100000..8000000] (default 4000000)", shell_spi2rampair),
+#endif
+    SHELL_CMD(spi2swapready, NULL, "V7 READY GPIO61 [1..10000 count] [0..1000 gap_ms] [100000..8000000 Hz]", shell_spi2swapready),
+    SHELL_CMD(spi2swapgpio, NULL, "GPIO Mode 3 [count] [gap_ms] [100000..400000 Hz]", shell_spi2swapgpio),    /* 低速实测入口。 */    /* 有界双向测试。 */
     SHELL_CMD(spi2entry, NULL, "master idle check; UMA must be slave first", shell_spi2entry),    /* 不发数据的主机入口检查。 */
 #endif
 #if defined(CONFIG_SPI_SLAVE) && IS_ENABLED(CONFIG_SPI_2)                                                        /* 只为启用 SPI2 从机的固件编译测试命令。 */

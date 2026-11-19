@@ -162,6 +162,9 @@ struct acts_spi_config {
 /* 每个实例的可变运行状态，设备对象 data 指向这里；与只读 config 分离。 */
 struct acts_spi_data {
     struct spi_context ctx;          /* 缓存配置、独占锁及双向缓冲游标。 */
+#if defined(CONFIG_SOC_SERIES_LEOPARD)
+    uint32_t spi2_hz;                /* SPI2 硬件分频回读值，供主机收发节拍和完成等待使用。 */
+#endif
     const struct device *dma_dev;    /* 初始化时绑定的 DMA 设备。 */
     struct k_sem dma_sync;           /* DMA 回调给出、传输函数等待的二值完成信号。 */
     uint8_t rxdma_chan;              /* 接收 DMA 期望通道或已申请的通道号，依所属结构而定。 */
@@ -204,31 +207,26 @@ static void spi_acts_wait_tx_complete(struct acts_spi_controller *spi)
         ;
 }
 
-/* 各 SPI 实例最近一次真正下发到 SoC 的频率（Hz），0 表示尚未设置。
- * 配置缓存只比较 config 指针地址，同一个栈地址复用时会漏掉新的 frequency，必须另外记录生效值。
- * 下标用 9 个槽覆盖 CLOCK_ID_SPI0=4 到 CLOCK_ID_SPI0CACHE=8，避免出现越界后每帧都重配时钟。 */
-#define SPI_APPLIED_HZ_SLOTS 9u
-static uint32_t s_spi_applied_hz[SPI_APPLIED_HZ_SLOTS];
+/* 缓存各实例上次成功配置的请求频率（Hz）；SPI2 的分频回读值另存于驱动上下文。
+ * spi_context 只按配置指针比较，无法发现应用复用同一地址后改了 frequency。 */
+#define SPI_CLOCK_REQ_SLOTS 9u
+static uint32_t s_spi_clock_req_hz[SPI_CLOCK_REQ_SLOTS];
 
 /**
-  * @brief  把 kHz 请求换算为 Hz 并调用 SoC 时钟分频配置。
+  * @brief  配置 SPI 控制器时钟并等待时钟稳定。
   * @param  cfg：[输入]本设备的有效只读静态配置，不可为空。
-  * @param  freq_khz：[输入]目标控制器时钟频率，单位 kHz。
-  * @retval 无；未传播 clk_set_rate 的状态。
-  * @note   配置后忙等 100 微秒；实际速率由时钟源和分频精度决定，从机线上 SCK 仍由外部提供。
+  * @param  freq_hz：[输入]目标控制器时钟频率，单位 Hz。
+  * @retval 0：设置完成；负数：SoC 时钟配置失败。
+  * @note   配置成功后等待 100 微秒；从机线上的 SCK 仍由外部主机提供。
   */
-static void spi_acts_set_clk(const struct acts_spi_config *cfg, uint32_t freq_khz)
+static int spi_acts_set_clk(const struct acts_spi_config *cfg, uint32_t freq_hz)
 {
-#if 1
-    /* 以下注释掉的历史时钟写法不执行；当前频率由 clk_set_rate 请求。 */
-    //sys_write32((sys_read32(CMU_SPICLK) & ~0xff00) | 0x0100, CMU_SPICLK);
+    int ret = clk_set_rate(cfg->clock_id, freq_hz);    /* 传播时钟错误，避免失败后仍拉低片选。 */
 
-    /* FIXME：原注释曾计划改用 soc_freq_set_spi_freq，并给出历史 396/6 分频示例；
-     * 该示例不是当前实际频率，运行值取决于 clk_set_rate 的 SoC 分频实现。 */
-    // 历史 180M/2=90M 示例不作为当前时钟结论。
-    clk_set_rate(cfg->clock_id, freq_khz*1000);    /* 将 kHz 乘 1000 转成 Hz，提交 SoC 时钟配置。 */
-    k_busy_wait(100);                              /* 配置后忙等 100 微秒，让时钟调整稳定。 */
-#endif
+    if (!ret) {
+        k_busy_wait(100);
+    }
+    return ret;
 }
 
 
@@ -727,7 +725,8 @@ int spi_acts_write_read_data(const struct acts_spi_config *cfg, struct acts_spi_
   * @retval 0：完成；-EINVAL：SPI2 从机双向缓冲无效或不等长；-ETIMEDOUT：CPU 收发或 TX 排空超时；-EIO：硬件错误；其他值来自底层路径。
   * @note   SPI2 CPU 从机成功才推进游标，失败关闭 FIFO、复位并清缓存；其他旧路径存在先推进后检查错误的不同顺序。
   */
-int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_data *data)
+static int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_data *data,
+                                  unsigned int burst_bytes)
 {
     struct acts_spi_controller *spi = cfg->spi;                                                                       /* 取得本实例寄存器映射，后续读写直接作用于外设。 */
     struct spi_context *ctx = &data->ctx;                                                                             /* 取得本设备独占上下文及当前块游标。 */
@@ -735,6 +734,11 @@ int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_da
     int ret = 0;                                                                                                      /* 在本轮检查前以成功初始化状态。 */
 
     chunk_size = spi_context_longest_current_buf(ctx);                                                                /* 单向取该方向长度，双向取较短当前块，避免越过块边界。 */
+
+    /* 限制单次硬件移位的字节数，帧尾可以短于设定段长。整帧片选由外层控制。 */
+    if (burst_bytes && chunk_size > (int)burst_bytes) {
+        chunk_size = (int)burst_bytes;
+    }
 
     /* 记录双向剩余长度和本轮共同块长，便于检查块切换。 */
     LOG_DBG("tx_len %d, rx_len %d, chunk_size %d",
@@ -796,8 +800,18 @@ int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_da
      * 本分支独立于 CONFIG_STANDARD_SPI，失败不推进游标，所有完成等待均有截止时间。 */
     if (cfg->clock_id == CLOCK_ID_SPI2 && !cfg->flag_use_dma &&
         SPI_OP_MODE_GET(ctx->config->operation) == SPI_OP_MODE_MASTER) {
-        uint32_t start;    /* 完成阶段的独立 10 ms 等待起点。 */
+        uint32_t frame_start;    /* 从调用全双工收发前起算，计入已经完成的移位时间。 */
+        uint32_t start;          /* 收尾状态轮询的独立 10 ms 超时起点。 */
+        uint32_t freq;           /* 控制器时钟，单位 Hz；LEOPARD SPI2 采用寄存器分频回读值。 */
+        uint64_t min_cycles;     /* 按控制器时钟估算完整帧所需的最小周期数。 */
         if (!ctx->tx_buf || !ctx->rx_buf || ctx->tx_len != ctx->rx_len || chunk_size <= 0) return -EINVAL;
+#if defined(CONFIG_SOC_SERIES_LEOPARD)
+        freq = data->spi2_hz;
+#else
+        freq = ctx->config->frequency;
+#endif
+        if (!freq) return -EIO;    /* 没有可用时钟就无法安全计算节拍。 */
+
         spi->status = SPI_STATUS_ERR_MASK;
         spi->ctrl |= SPI_CTL_RX_FIFO_EN | SPI_CTL_TX_FIFO_EN;
         /* v9 起帧前清空 RX FIFO：时间闸门让驱动在最后一位到达处就收工，可能还剩一字节
@@ -811,36 +825,24 @@ int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_da
                 flush++;
             }
         }
-        ret = spi_acts_write_read_data_by_cpu(spi, ctx->tx_buf, ctx->rx_buf, chunk_size,                 /* 主机等长双向收发，传入实际生效频率用于时间闸门。 */
-                                             ctx->config->frequency);
+        /* 保留原帧时长约束，但计入 FIFO 收发已经消耗的时间。 */
+        min_cycles = ((uint64_t)chunk_size * 8ull * CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC) / freq;
+        frame_start = k_cycle_get_32();
+        ret = spi_acts_write_read_data_by_cpu(spi, ctx->tx_buf, ctx->rx_buf, chunk_size, freq);
 
-        /* v6 物理时间地板：实测 812.5 kHz 下整条命令平均 0.82 ms/帧，而 256 字节在 800 kHz
-         * 的物理下限是 2.56 ms。差出来这段时间说明驱动在硬件仍移位时就返回了，下一帧立刻开始，
-         * 两帧的时钟叠在一起，从机按帧边界做 CRC 必然失败（实测 got=256 chk=-1）。
-         * 这里按 chunk_size*8/frequency 算出最小时长，没走满就不许返回。 */
-        {
-            uint32_t freq = ctx->config->frequency ? ctx->config->frequency : 1u;                 /* 本次实际生效的时钟。 */
-            uint64_t need = ((uint64_t)chunk_size * 8ull * (uint64_t)CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC) /* 理论最短周期数。 */
-                            / (uint64_t)freq;
-            uint32_t w0 = k_cycle_get_32();                                                        /* 本段的计时起点。 */
-            while (!ret && (uint32_t)(k_cycle_get_32() - w0) < (uint32_t)need) {                   /* 未走满物理时间就空转等待。 */
-                k_busy_wait(1);                                                                    /* 让出一点流水线，避免把总线读得太密。 */
-            }
-        }
-
-        /* RX 数量足够后仍需等待最后一位离开移位器，随后由上层释放 CS。 */
+        /* 全量 RX 已经入缓冲。还需确认帧时长、发送队列和移位器全部满足条件，
+         * 避免上层提前释放 CS。任一条件异常时走原有超时及复位恢复。 */
         start = k_cycle_get_32();
-        while (!ret && (!(spi->status & SPI_STATUS_TX_EMPTY) || (spi->status & SPI_STATUS_BUSY))) {
-            if (k_cyc_to_ms_ceil32(k_cycle_get_32() - start) > 10) ret = -ETIMEDOUT;
+        while (!ret && ((uint32_t)(k_cycle_get_32() - frame_start) < min_cycles ||
+                        !(spi->status & SPI_STATUS_TX_EMPTY) || (spi->status & SPI_STATUS_BUSY))) {
+            if (k_cyc_to_ms_ceil32(k_cycle_get_32() - start) > 10) {
+                ret = -ETIMEDOUT;
+            }
         }
         if (!ret && (spi->status & SPI_STATUS_ERR_MASK)) ret = -EIO;
         spi->ctrl &= ~(SPI_CTL_WR_MODE_MASK | SPI_CTL_RX_FIFO_EN | SPI_CTL_TX_FIFO_EN);
-        if (ret) {
-            /* 失败必须丢弃硬件残留：实测 26 MHz 那一帧失败后，下一次命令整条静音（连横幅都不出），
-             * 说明控制器留在半截状态。复位外设并清配置缓存，保证下一条命令从干净状态重配。 */
-            acts_reset_peripheral(cfg->reset_id);                                      /* 复位外设，丢掉 FIFO 与移位器残留。 */
-            ctx->config = NULL;                                                        /* 清配置缓存，强制下次重新初始化。 */
-        } else {
+        /* 错误交给外层，先释放片选再复位。成功才推进到下一个硬件传输段。 */
+        if (!ret) {
             spi_context_update_tx(ctx, 1, chunk_size);                                 /* 成功才推进发送游标。 */
             spi_context_update_rx(ctx, 1, chunk_size);                                 /* 成功才推进接收游标。 */
         }
@@ -901,8 +903,8 @@ int spi_acts_transfer_data(const struct acts_spi_config *cfg, struct acts_spi_da
   * @param  cfg：[输入]本设备的有效只读静态配置，不可为空。
   * @param  spi：[输入/输出]驱动运行数据，不是寄存器结构，不可为空。
   * @param  config：[输入]有效 SPI 配置，不可为空，传输期间保持地址和内容有效。
-  * @retval 当前实现固定返回 0。
-  * @note   只按地址判断缓存；位宽非 8/32 时回退到 8 位，不报告不支持。frequency 经 Hz→kHz 截断后交给 SoC 时钟接口。
+  * @retval 0：完成；-EINVAL：频率为零；-ERANGE：SPI2 频率不可达；-EIO：SPI2 时钟回读异常。
+  * @note   SPI2 保留 Hz 精度并核对分频回读；其他实例沿用原先的 kHz 粒度。
   */
 int spi_acts_configure(const struct acts_spi_config *cfg,
                 struct acts_spi_data *spi,
@@ -915,13 +917,32 @@ int spi_acts_configure(const struct acts_spi_config *cfg,
 
     ctrl = SPI_CTL_DELAYCHAIN(cfg->delay_chain);                      /* 以板级延迟链配置作为控制字初值。 */
 
-    /* 频率改动必须真正下发：配置缓存只比较 config 指针地址，同一个栈地址复用新内容时
-     * 会被判成"未变化"而直接返回，导致应用在运行中改频率完全无效（实测只有第一次生效）。 */
+    /* 时钟缓存独立于 spi_config 指针。SPI2 若回读已经改变，即使请求相同也重新配置。 */
     {
-        unsigned int idx = (unsigned int)cfg->clock_id;                                                   /* 实例编号（CLOCK_ID_SPI0=4…SPI3=7），用作生效频率记录的下标。 */
-        if (idx >= SPI_APPLIED_HZ_SLOTS || s_spi_applied_hz[idx] != config->frequency) {                  /* 只有频率真的变了才下发，避免每帧都改时钟并刷日志。 */
-            spi_acts_set_clk(cfg, config->frequency / 1000);                                              /* 重新计算分频并写入 SoC，内部含 100 微秒稳定等待。 */
-            if (idx < SPI_APPLIED_HZ_SLOTS) s_spi_applied_hz[idx] = config->frequency;                    /* 记录本次生效值；下标异常时退回每次都下发，保证不会漏配。 */
+        unsigned int idx = cfg->clock_id;    /* CLOCK_ID_SPI0～SPI3 用于索引已成功的请求。 */
+        uint32_t request = config->frequency;
+        uint32_t clock_hz = (request / 1000u) * 1000u;    /* 保留其他 SPI 实例的旧配置粒度。 */
+        bool changed = idx >= SPI_CLOCK_REQ_SLOTS || s_spi_clock_req_hz[idx] != request;
+        int ret;
+
+        if (!request) return -EINVAL;
+#if defined(CONFIG_SOC_SERIES_LEOPARD)
+        if (idx == CLOCK_ID_SPI2) {
+            clock_hz = request;
+            changed = changed || !spi->spi2_hz || clk_get_rate(idx) != spi->spi2_hz;
+        }
+#endif
+        if (changed) {
+            ret = spi_acts_set_clk(cfg, clock_hz);
+            if (ret) return ret;    /* 未成功的请求不写入缓存，也不启动收发。 */
+
+#if defined(CONFIG_SOC_SERIES_LEOPARD)
+            if (idx == CLOCK_ID_SPI2) {
+                spi->spi2_hz = clk_get_rate(idx);
+                if (!spi->spi2_hz || spi->spi2_hz > request) return -EIO;
+            }
+#endif
+            if (idx < SPI_CLOCK_REQ_SLOTS) s_spi_clock_req_hz[idx] = request;
         }
     }
 
@@ -994,11 +1015,14 @@ int spi_acts_configure(const struct acts_spi_config *cfg,
   * @retval 0：角色及模式回读正确；-EINVAL：空指针；-ENOTSUP：非 LEOPARD SPI2 CPU 四线配置；-EIO：配置回读不符。
   * @note   调用者须持唤醒锁，且已确认对端不再运行主机固件。只验证配置，不验证线上时钟与数据。
   */
+#include "spi_acts_spi2_dma.h"
+#include "spi_acts_spi2_circular.h"
+
 int spi_acts_spi2_entry_check(const struct device *dev)
 {
 #if defined(CONFIG_SOC_SERIES_LEOPARD)
     static const struct spi_config config = {
-        .frequency = 812500,              /* 请求频率；尚未发钟，实际频率需后续用逻辑分析仪测量。 */
+        .frequency = 2300000,             /* 32 MHz HOSC 选 ÷14，回读约 2.286 MHz。 */
         .operation = SPI_OP_MODE_MASTER | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8),
     };
     const struct acts_spi_config *cfg;    /* 本实例只读的板级配置。 */
@@ -1040,6 +1064,139 @@ int spi_acts_spi2_entry_check(const struct device *dev)
 
 
 
+#if defined(CONFIG_SOC_SERIES_LEOPARD)
+/**
+  * @brief  从上一条边沿开始等待最短半周期。
+  * @param  start：[输入]上一条边沿后的硬件周期计数。
+  * @param  ticks：[输入]等待的硬件周期数。
+  * @retval 无。
+  * @note   无符号差支持计数回绕。中断只会拉长当前半周期。
+  */
+static inline void spi2_gpio_wait(uint32_t start, uint32_t ticks)
+{
+    while ((uint32_t)(k_cycle_get_32() - start) < ticks) {
+        /* 等待硬件计数达到要求，不按绝对时刻追赶。 */
+    }
+}
+#endif
+
+/**
+  * @brief  用 GPIO57～60 发出低速 Mode 3 时钟并交换一帧。
+  * @param  dev：[输入]Actions SPI2 设备，不可为空。
+  * @param  tx：[输入]至少 len 字节的可读缓冲区，不可为空。
+  * @param  rx：[输出]至少 len 字节的可写缓冲区，不可为空。
+  * @param  len：[输入]1～256 字节。
+  * @param  hz：[输入]时钟上限 100000～400000 Hz。
+  * @retval 0：完成；-EINVAL：参数无效；-ENOTSUP：实例不支持；-EBUSY：总线或引脚不可用；-ETIMEDOUT：帧超时。
+  * @note   线程调用并持唤醒锁。与 SPI2 硬件共用互斥锁；传输期间允许中断。
+  */
+int spi_acts_spi2_gpio_transceive(const struct device *dev, const uint8_t *tx,
+                                 uint8_t *rx, size_t len, uint32_t hz)
+{
+#if defined(CONFIG_SOC_SERIES_LEOPARD)
+    const uint32_t select = GPIO_BIT(57);          /* CS#，低有效。 */
+    const uint32_t sclk = GPIO_BIT(58);            /* Mode 3 时钟，空闲高。 */
+    const uint32_t miso = GPIO_BIT(59);            /* 从机输出，主机只读。 */
+    const uint32_t mosi = GPIO_BIT(60);            /* 主机输出，MSB 先行。 */
+    const uint32_t outputs = select | sclk | mosi; /* 本诊断会修改的 GPIO 输出位。 */
+    const uint32_t mux_mask = GPIO_CTL_MFP_MASK | GPIO_CTL_GPIO_OUTEN | GPIO_CTL_GPIO_INEN;
+    const struct acts_spi_config *cfg;            /* 已注册设备的硬件配置。 */
+    struct acts_spi_data *data;                   /* 与硬件 SPI2 共用的互斥锁。 */
+    uint32_t pin_ctl[4];                          /* 保存 GPIO57～60 的原复用和电气配置。 */
+    uint32_t latch;                               /* 保存被诊断覆盖的输出锁存位。 */
+    uint32_t half_cycles;                         /* 半周期的最短硬件计数。 */
+    uint32_t frame_start;                         /* CS# 拉低时的计时起点。 */
+    int ret = 0;                                 /* 传输或参数检查状态。 */
+
+    /* 限定实例与时间预算。只接管已配置为 SPI2 的 GPIO57～60。 */
+    if (!dev || !tx || !rx || !len || len > 256u || hz < 100000u || hz > 400000u) {
+        return -EINVAL;
+    }
+    cfg = DEV_CFG(dev);
+    data = DEV_DATA(dev);
+    if (cfg->clock_id != CLOCK_ID_SPI2 || cfg->spi_3wire) {
+        return -ENOTSUP;
+    }
+    if (k_sem_take(&data->ctx.lock, K_MSEC(100)) != 0) {
+        return -EBUSY;
+    }
+    if (cfg->spi->status & SPI_STATUS_BUSY) {
+        ret = -EBUSY;
+        goto unlock;
+    }
+    for (unsigned int pin = 57u; pin <= 60u; ++pin) {
+        pin_ctl[pin - 57u] = sys_read32(GPION_CTL(pin));
+        if ((pin_ctl[pin - 57u] & GPIO_CTL_MFP_MASK) != MFP_SPI2) {
+            ret = -EBUSY;
+            goto unlock;
+        }
+    }
+
+    /* 硬件主机先释放片选，GPIO 先写锁存值再切复用。CS# 先切换，
+     * 让设置 CLK 空闲高时的跳变发生在片选无效期间。 */
+    if (!(cfg->spi->ctrl & SPI_CTL_MS_SEL_SLAVE)) {
+        cfg->spi->ctrl |= SPI_CTL_SS;
+    }
+    latch = sys_read32(GPION_ODAT(57)) & outputs;
+    sys_write32(select | sclk, GPION_BSR(57));
+    sys_write32(mosi, GPION_BRR(57));
+    for (unsigned int pin = 57u; pin <= 60u; ++pin) {
+        uint32_t direction = pin == 59u ? GPIO_CTL_GPIO_INEN : GPIO_CTL_GPIO_OUTEN;
+
+        sys_write32((pin_ctl[pin - 57u] & ~mux_mask) | direction, GPION_CTL(pin));
+    }
+
+    /* 半周期向上取整；逐边沿计时允许抢占造成停顿，避免恢复后产生快速脉冲簇。 */
+    half_cycles = (CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC + 2u * hz - 1u) / (2u * hz);
+    sys_write32(select, GPION_BRR(57));
+    frame_start = k_cycle_get_32();
+    spi2_gpio_wait(frame_start, half_cycles);
+
+    /* Mode 3 在下降沿更新 MOSI，在上升沿之后、下一下降沿之前读取 MISO。 */
+    for (size_t i = 0u; i < len; ++i) {
+        uint8_t out = tx[i];    /* 每次移位准备本字节的下一位。 */
+        uint8_t in = 0u;        /* 8 次采样按 MSB 优先累积到一个字节。 */
+
+        if (k_cyc_to_ms_ceil32(k_cycle_get_32() - frame_start) >= 100u) {
+            ret = -ETIMEDOUT;
+            break;
+        }
+        for (unsigned int bit = 0u; bit < 8u; ++bit) {
+            uint32_t edge;    /* 当前半周期的起点，在 GPIO 边沿后读取。 */
+
+            sys_write32(sclk, GPION_BRR(58));
+            edge = k_cycle_get_32();
+            sys_write32(mosi, (out & 0x80u) ? GPION_BSR(60) : GPION_BRR(60));
+            spi2_gpio_wait(edge, half_cycles);
+            sys_write32(sclk, GPION_BSR(58));
+            edge = k_cycle_get_32();
+            spi2_gpio_wait(edge, half_cycles);
+            in = (uint8_t)((in << 1) | !!(sys_read32(GPION_IDAT(59)) & miso));
+            out <<= 1;
+        }
+        rx[i] = in;
+    }
+
+    /* 正常结束和超时都先拉高片选，最后还原 GPIO57，防止复用切换时从机误采 CLK。 */
+    sys_write32(select, GPION_BSR(57));
+    for (unsigned int pin = 60u; pin >= 57u; --pin) {
+        sys_write32(pin_ctl[pin - 57u], GPION_CTL(pin));
+    }
+    sys_write32(latch, GPION_BSR(57));
+    sys_write32(outputs & ~latch, GPION_BRR(57));
+unlock:
+    k_sem_give(&data->ctx.lock);
+    return ret;
+#else
+    ARG_UNUSED(dev);
+    ARG_UNUSED(tx);
+    ARG_UNUSED(rx);
+    ARG_UNUSED(len);
+    ARG_UNUSED(hz);
+    return -ENOTSUP;
+#endif
+}
+
 /**
   * @brief  串行化一次请求，配置控制器并处理全部缓冲块及片选收尾。
   * @param  dev：[输入]由设备注册宏创建的 SPI 设备，不可为空。
@@ -1048,15 +1205,18 @@ int spi_acts_spi2_entry_check(const struct device *dev)
   * @param  rx_bufs：[输入/输出]接收集合，可为空；非空时描述可读、数据区可写。
   * @param  asynchronous：[输入]是否保存异步通知方式。
   * @param  signal：[输入/输出]可选异步完成信号，生命周期覆盖请求。
+  * @param  burst_gap_us：SPI2 主机硬件分段间停顿，0 表示连续传输。
+  * @param  burst_bytes：每段字节数上限，连续模式传 0。
   * @retval 0：成功或双向空集合；-EINVAL、-ETIMEDOUT、-EIO 等来自配置和传输路径。
   * @note   获取上下文锁可能永久等待；当前实现实际收发在本调用内轮询执行。SPI2 CPU 从机每次请求复位且清缓存；从机不主动驱动硬件 SS。
   */
-int transceive(const struct device *dev,
+static int transceive(const struct device *dev,
               const struct spi_config *config,
               const struct spi_buf_set *tx_bufs,
               const struct spi_buf_set *rx_bufs,
               bool asynchronous,
-              struct k_poll_signal *signal)
+              struct k_poll_signal *signal, unsigned int burst_gap_us,
+              unsigned int burst_bytes)
 {
     const struct acts_spi_config *cfg =DEV_CFG(dev);;                                 /* 读取静态实例配置；保留原语句中多余分号。 */
     struct acts_spi_data *data = DEV_DATA(dev);;                                      /* 取得可变运行状态；上下文由本设备独占锁保护。 */
@@ -1107,7 +1267,11 @@ int transceive(const struct device *dev,
         }
     }
     do {                                                                              /* 先处理至少一轮当前数据块，再检查双方剩余长度。 */
-        ret = spi_acts_transfer_data(cfg, data);                                      /* 执行当前块的搬运、完成检查及必要恢复。 */
+        ret = spi_acts_transfer_data(cfg, data, burst_bytes);
+        /* 每段等待 TX 排空且 BUSY 清零后才暂停。此时 CS# 仍低，SCLK 保持模式 3 空闲态。 */
+        if (!ret && burst_gap_us && spi_acts_transfer_ongoing(data)) {
+            k_busy_wait(burst_gap_us);
+        }
     } while (!ret && spi_acts_transfer_ongoing(data));                                /* 无错误且仍有剩余数据时处理下一块。 */
     /* 收发循环退出后，主机按软件 GPIO 或硬件 SS 路径释放片选。 */
     if (SPI_OP_MODE_MASTER == SPI_OP_MODE_GET(config->operation)) {                   /* 主机才主动控制片选，从机响应外部SS。 */
@@ -1147,8 +1311,34 @@ static int spi_acts_transceive(const struct device *dev,
                   const struct spi_buf_set *tx_bufs,
                   const struct spi_buf_set *rx_bufs)
 {
-  return transceive(dev, config, tx_bufs,  rx_bufs, false, NULL);    /* 同步包装入口直接执行全部传输，不提交异步信号。 */
+  return transceive(dev, config, tx_bufs, rx_bufs, false, NULL, 0u, 0u);    /* 同步包装入口直接执行全部传输，不提交异步信号。 */
 
+}
+
+/* 硬件分段入口沿用 SPI2 的设备锁、全双工缓冲游标和错误复位。 */
+int spi_acts_spi2_transceive_paced(const struct device *dev,
+                                  const struct spi_config *config,
+                                  const struct spi_buf_set *tx_bufs,
+                                  const struct spi_buf_set *rx_bufs,
+                                  unsigned int burst_gap_us, unsigned int burst_bytes)
+{
+    if (!dev || !config || !tx_bufs || !rx_bufs ||
+        !burst_gap_us || burst_gap_us > 1000u ||
+        burst_bytes < 2u || burst_bytes > SPI_ACTS_SPI2_BURST_MAX || (burst_bytes & 1u) ||
+        !tx_bufs->buffers || !rx_bufs->buffers ||
+        tx_bufs->count != 1u || rx_bufs->count != 1u ||
+        !tx_bufs->buffers[0].buf || !rx_bufs->buffers[0].buf ||
+        !tx_bufs->buffers[0].len || tx_bufs->buffers[0].len > 256u ||
+        tx_bufs->buffers[0].len != rx_bufs->buffers[0].len ||
+        SPI_OP_MODE_GET(config->operation) != SPI_OP_MODE_MASTER ||
+        SPI_WORD_SIZE_GET(config->operation) != 8u ||
+        (config->operation & SPI_HOLD_ON_CS)) {
+        return -EINVAL;
+    }
+    if (DEV_CFG(dev)->clock_id != CLOCK_ID_SPI2 || DEV_CFG(dev)->flag_use_dma) {
+        return -ENOTSUP;
+    }
+    return transceive(dev, config, tx_bufs, rx_bufs, false, NULL, burst_gap_us, burst_bytes);
 }
 
 #ifdef CONFIG_SPI_ASYNC
@@ -1169,7 +1359,7 @@ static int spi_acts_transceive_async(const struct device *dev,
                    const struct spi_buf_set *rx_bufs,
                    struct k_poll_signal *async)
 {
-    return transceive(dev, config, tx_bufs,  rx_bufs, true, async);    /* 异步包装保存信号参数，但当前硬件收发仍在本调用内执行。 */
+    return transceive(dev, config, tx_bufs, rx_bufs, true, async, 0u, 0u);    /* 异步包装保存信号参数，但当前硬件收发仍在本调用内执行。 */
 
 }
 #endif    /* CONFIG_SPI_ASYNC */

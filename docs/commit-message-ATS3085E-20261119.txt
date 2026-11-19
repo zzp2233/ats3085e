@@ -1,0 +1,117 @@
+修改项：SPI2 主机提速 V5～V11：PDMA 收发、READY 握手、512B 双帧块、硬件 RX 环形 reload 与 4 MHz 文件传输
+
+一、问题定位（先说清为什么动这些文件）
+- 基线 b05dbd4（256B v3 双向链路）。实测瓶颈不在时钟：16B 帧把时钟从 0.8MHz
+  提到 10.7MHz 总时间几乎不变，说明帧间间隔和每帧固定开销按"帧"收取；
+  唯一有效的杠杆是加大帧长、去掉固定间隔盲发、把供数从 CPU 换成 DMA。
+- 主机驱动四点定位：
+  1) spi_context 只按配置指针地址比较缓存，同一栈地址复用并改 frequency 时
+     被判"未变化"跳过重配，实测运行中改频率只有第一次生效；
+  2) clk_set_rate 固定返回 0，且 SPI0~3 通用路径为 kHz 粒度分频，
+     无法支持 4/8 MHz 精确档，配置失败也不报错，失败后仍拉低片选；
+  3) CPU 收发路径的时间闸门从收发调用后起算，没计入 FIFO 移位已耗时间，
+     过早返回使两帧时钟叠加，从机按帧边界做 CRC 必失败（got=256 chk=-1）；
+  4) 失败复位发生在外层释放片选之前，控制器留在半截状态，
+     实测 26MHz 那一帧失败后下一条命令整条静音。
+- 从机供数实验：503 打包 PIO 一次搬两个样本、预装 14→28B，350kHz 档仍偶发
+  欠载；改硬件 SPI 后段内回读 2.286MHz 连续整帧同时触发从机 TX 欠载和 RX
+  溢出。保持整帧 CS、只在段间暂停 SCK（5ms 帧间隔、300µs 段间停顿、12B/段）
+  过 10 轮千帧零重试，证明供数窗口决定结果，CPU 供数到顶，必须上 DMA。
+- 固定间隔盲发观测不到从机重装窗口：V5 单轮千帧通过后复现整帧漏收
+  （主机事务数比从机有效计数多 1，bad 仍为 0）；V6 在 seq=204 前后从机
+  RX 溢出而主机仍收到 seq=203 应答。需要从机发许可（READY）替代固定间隔。
+- V7 握手后拆解等待：10,000 次 99.560s 中等 READY 占 93.38s（93.8%），
+  单次 SPI 调用约 554µs ≈ 256B@4MHz 的 512µs 线时，等待本身合理，
+  要降等待只能一次许可传更多数据 → V10 一个 CS 内 512B 双帧块，
+  V11 把逐块软件重装换成硬件描述符环。
+- V11 首版 500 块在第 46 笔主机报 -5 而从机 46 块全收对：定位为主机驱动
+  先读 SPI 状态、后读 DMA 完成事件的跨时刻采样竞态（旧 RX_EMPTY 拼新
+  完成事件误报 -5）。V11A 改为先读 DMA 事件/计数再读 SPI 状态。
+
+二、分文件改动（改了什么、为什么）
+1) zephyr/soc/arm/actions/leopard/soc_clock.c / soc_clock.h
+- 新增 acts_clk_set_rate_spi2()：按手册 §10.4.3.9 直接配 CMU_SPI2CLK
+  的 HOSC 源[9:8] + 4 位分频[3:0]（编码 14/15 对应 ÷1.5/÷2.5），
+  分数比较选不超过请求的最快档，写后回读源与分频字段，不符返回 -EIO，
+  低于最慢档返回 -ERANGE；clk_get_rate 按 CMU_SPI2CLK 实际字段推算频率。
+- 为什么：4/8 MHz 精确分频与配置失败上报只此一途；SPI0/1/3 沿用原路径。
+2) zephyr/drivers/spi/spi_acts.c
+- 请求频率缓存独立于配置指针（s_spi_clock_req_hz[9]）；SPI2 另存
+  spi2_hz 分频回读值，回读变化即使请求相同也重配；spi_acts_set_clk
+  传播 clk_set_rate 错误，未成功的请求不写缓存不启动收发。
+- SPI2 主机等长 CPU 路径：支持分段收发（burst_bytes 2~16 偶数，
+  段边界保留 503 双样本 FIFO 项，整帧只拉一次 CS）；时间闸门改为
+  帧时长+TX 空+非忙三条件同时满足才返回；失败先由外层释放片选再复位。
+3) zephyr/include/drivers/spi_acts_entry.h
+- 新增导出声明：spi_acts_spi2_gpio_transceive（GPIO 低速诊断）、
+  spi_acts_spi2_transceive_dma（V5/V10，512B 上限，40ms 截止）、
+  spi_acts_spi2_circular_open/transfer/close（V11 会话独占总线）、
+  spi_acts_spi2_transceive_paced（分段收发）。
+4) 新增 zephyr/drivers/spi/spi_acts_spi2_dma.h
+- V5 验证路径：SDK PDMA 分配器，内部 RAM bounce buffer（地址范围检查），
+  TX/RX 计数与线上空闲核对，STOP 故障隔离缓冲与通道直到重启；
+  含 V11 RX 1,024B 双半区硬件 reload 环的缓冲。
+5) 新增 zephyr/drivers/spi/spi_acts_spi2_circular.h
+- V11 硬件环实现：RX 环持续 reload，TX 有限计数约束时钟总数
+  （SPI2_BC 只限 READ 模式，全双工 TX 不得 reload）；open→transfer→close
+  会话模型，open 自回滚，close 前调用者独占总线；V11A 增加先读 DMA 事件
+  再读 SPI 状态，及 stage/sample/halted 失败诊断与 BLOCKED 提示。
+6) application/.../src/main/spi_link_swap.h
+- swap_crc 由逐位运算改为 16 项半字节查表，线上 CRC16 定义与结果不变；
+  协议头注释修正：V5 保持 v3 线上布局/256B 帧/原 CRC，旧预装限制只适用于 PIO。
+7) 新增 src/main/spi_link_ready.h
+- V8/V9 单线 READY 握手：UMA GPIO50 → ATS GPIO61（1.8V）。从机完成
+  武装+预装后翻转电平授权一笔传输；先消费令牌再打时钟；令牌跨命令存活，
+  READY/legacy 混用或传输宽度混用一律拒绝并要求双板重启（故障后重同步
+  会消费未跟踪令牌，静默恢复等于掩盖问题）；GPIO 双沿中断唤醒既有任务，
+  不新增缓冲与线程栈；编译期检查 GPIO61 未被 I2C2/SPIMT0/MMC0 占用。
+8) 新增 src/main/spi_link_block.h
+- V10 块传输：一次 CS/READY/DMA 事务承载 2 个完整 256B v3 帧（512B），
+  块 b 携带逻辑序号 2b/2b+1，两帧都校验通过才整体确认，下一块回执
+  上一确认块；启动回执 sid=0、序号 65534/65535；禁止与 V9A 固件混用。
+9) 新增 src/main/spi_link_circular.h
+- V11 主机 shell 命令（spi2circ）：512B、双槽 DMA 环、ACK 延迟 2 块
+  （TX 预取下一槽），READY 每块一个令牌；仅与 V11 对端配套，
+  与 V10 的 ACK 延迟不同，同轮共存被 -EPERM 拒绝。
+10) 新增 src/main/spi_link_file_protocol.h / spi_link_file_host.h
+- SPI FILE V1 线协议（两端逐字节一致）：16B 头、480B 数据、100 块一组、
+  13B 位图 ACK 定位坏块/缺块、整份 CRC32、配对见证字；主机端从本地
+  文件系统发送（spi2file）、生成图案（spi2filetest）、RAM 基准
+  （spi2ram/spi2rampair，支持 --hz 100kHz~8MHz）。
+11) application/.../src/main/system_app_shell.c
+- 抽取公共入口 spi2swap_run(gpio/dma/ready/block2)，首发与重发共用同一
+  时钟与节拍；重试时重放 i-1 帧重新装入要等的确认；确认错误最多重建两次
+  流水，DMA 模式失败立即退出；输出 xfer 平均/最大耗时、READY 等待累计/
+  峰值、SPI9 A/B/E 分段诊断等量化判据；新增命令注册见命令表。
+12) docs/ 与 tests/
+- 复盘文档（提速复盘 11-16~19、V11/V11A 设计与实测、提交说明模板）
+  与 UMA503 仓库各存一份；tests/ 8 个 Python 串口自动化回归
+  （V5/V7/V10/V11 主机侧 + V11A 打包与一键检查）。
+
+三、验证命令
+- 先烧录 503 配套从机固件，COM6 出现预装/READY 提示后，3085E 侧：
+  app spi2swap [count] [gap_ms] [Hz]            旧 PIO 基线
+  app spi2swapdma [1..10000] [10..1000] [Hz]    V5 DMA
+  app spi2swapready [1..10000] [0..1000] [Hz]   V7~V9 READY
+  app spi2swapblock2 [1..10000] [0..1000] [Hz]  V10 双帧块
+  app spi2circ [1..10000] [0..1000] [Hz]        V11 硬件环（主机 open 行须有 rev=11a）
+  app spi2filetest / spi2ram / spi2rampair …    文件/RAM 基准
+- 判据：PASS 且 confirmed=count、retries=0；V11 另需 good=N、
+  tx_blocks=N+2、rx_starts=1；从机侧块数增量 N+2、bad=0、starts=1/rearm=0。
+
+四、验证结果（有效载荷吞吐 = 校验通过字节 ÷ 整轮耗时）
+- 分段 PIO：5ms 帧间隔、300µs 段停、12B/段，10 轮千帧零重试，约 13s/千帧。
+- V5：4MHz、10ms，千次 11s、21,818 B/s；随后复现整帧漏收（根因见上）。
+- V7：4MHz 间隔 0，10,000 次 99.560s、24,106 B/s，等待占比 93.8%。
+- V9A：1/10/1,000/10,000 次全通过，最长 48.074s、49,923 B/s。
+- V10：V9A 与 V10 各传 2.4MB，48.074s→40.715s，49,923→58,946 B/s。
+- V11A+V11：4MHz 六轮通过，两次 5,000 块长测 63,106 / 63,066 B/s；
+  V11B 长测 91,757 B/s（5,000 块 26.156s，双端事务增量均 5,002）。
+- CRC/热点迁 RAM 后：4MHz 29 轮×3,000 块共 41.76MB 零重传，中位约 331.0 kB/s。
+- 8MHz：注错连续 10 轮只补预设坏块一次、整份 CRC32 一致；正常长测
+  24 轮×3,000 块共 34.56MB、720 组，零重传零失败，各轮 CRC32=7eb2f066，
+  吞吐 510.5~522.1 kB/s（对应约 5cm 接线与 RAM 消费路径）。
+- 边界（未证明/不能外推）：V11A 首块旧故障（ACK CRC -1、sid=FFFF）原因
+  待新日志证实；ATS SRAM 链接余量仅 592B，继续扩缓冲前必须查 map；
+  READY 故障后令牌跨命令存活，恢复手段是双板重启而非重跑命令；
+  录音实时负载、SD、蜂窝上传与更长线缆需各自验收。

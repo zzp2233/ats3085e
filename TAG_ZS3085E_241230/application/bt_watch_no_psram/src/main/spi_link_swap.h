@@ -3,16 +3,13 @@
  *   [0] 方向、[1] 版本、[2..3] 会话、[4..5] 小端序号、[6..11] 六字节图案、
  *   [12..13] 头部 CRC16（覆盖 [0..11]）、[14..SWAP_SIZE-3] 载荷图案、
  *   [SWAP_SIZE-2..SWAP_SIZE-1] 整帧 CRC16（覆盖前 SWAP_SIZE-2 字节）。
- * 为什么加长块：帧间间隔（约 2 ms）和每帧固定开销（约 0.85 ms）是按"帧"付的，不是按字节付的。
- * 16 字节一帧时实测把时钟从 0.8 MHz 提到 10.7 MHz，总时间几乎不变，说明瓶颈不在时钟。
- * 一帧 256 字节把这笔固定成本摊到 16 倍数据上，是唯一有效的提速杠杆。
- * 从机仍然一次只预装 SWAP_PRELOAD=14 字节（PL022 FIFO 一次可可靠排队的上限，写满 16 会丢最早两字节），
- * 传输过程中按空槽回填，因此必须能自恢复：坏帧时关掉 SSP 让硬件清空收发 FIFO，再重新武装。
+ * V5 保持 v3 线上布局、256 字节帧和原 CRC 定义；提速不改变协议。
+ * 旧 PIO 预装限制只适用于 PIO；503 DMA 不使用 SWAP_PRELOAD。
  * 从机在下一次事务回报上一有效请求的会话及序号；启动空闲帧为 sid=0、seq=65535。 */
 #ifndef SPI_LINK_SWAP_H_
 #define SPI_LINK_SWAP_H_
 #include <stdint.h>    /* 使用固定宽度整数，线协议不依赖两端 int 大小。 */
-#define SWAP_SIZE 256u        /* 一帧总线字节数；想再提速只改这一个数（1024 已验证可行路径）。 */
+#define SWAP_SIZE 256u        /* 固定帧长；扩帧必须同步修改两端驱动、缓冲区及验证。 */
 #define SWAP_HDR 14u          /* 帧头有效字节数，含头部 CRC。 */
 #define SWAP_TAIL 2u          /* 帧尾整帧 CRC 字节数。 */
 #define SWAP_PRELOAD 14u      /* 从机传输前可一次可靠装入 FIFO 的字节数。 */
@@ -37,19 +34,20 @@ static inline uint16_t swap_u16(const uint8_t *p)
   * @param  p：[输入]至少 n 字节可读缓冲区，不可为空。
   * @param  n：[输入]参与校验的字节数量。
   * @retval 初值 0xffff、多项式 0x1021 的 CRC，无最终异或。
-  * @note   无查表内存，不修改输入；位运算实现，长度变大后仍与两端实现一致。
+  * @note   16 项半字节查表，不修改输入；与原逐位 CRC 完全兼容。
   */
 static inline uint16_t swap_crc(const uint8_t *p, unsigned int n)
 {
-    uint16_t crc = 0xffff;    /* 采用协议规定的初始余数。 */
-    unsigned int i, bit;     /* 分别遍历字节和字节内的位。 */
-
-    /* 高位先处理，与两端 CPU 本机字节序无关。 */
+    static const uint16_t table[16] = {
+        0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
+        0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef
+    };
+    uint16_t crc = 0xffff;
+    unsigned int i;
     for (i = 0; i < n; ++i) {
         crc ^= (uint16_t)p[i] << 8;
-        for (bit = 0; bit < 8; ++bit) {
-            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
-        }
+        crc = (uint16_t)((crc << 4) ^ table[crc >> 12]);
+        crc = (uint16_t)((crc << 4) ^ table[crc >> 12]);
     }
     return crc;
 }
