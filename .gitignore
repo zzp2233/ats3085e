@@ -31,3 +31,6 @@ __pycache__/
 *.dmp
 
 # ---- 注：.elf / .bin / .a / .lib / .FW 均为 SDK 预编译工具或库，务必入库，不要忽略 ----
+
+# Local device credentials/tokens (never commit)
+/.local/
