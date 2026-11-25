@@ -18,7 +18,7 @@
 #define	CLOCK_ID_OTFD			3             /* 门控位号，用于OTFD模块。 */
 #define	CLOCK_ID_SPI0			4             /* 门控位号，用于SPI0模块。 */
 #define	CLOCK_ID_SPI1			5             /* 门控位号，用于SPI1模块。 */
-#define	CLOCK_ID_SPI2			6             /* 普通SPI2门控位6，本次从机驱动实际使用。 */
+#define	CLOCK_ID_SPI2			6             /* SPI2 时钟门控和频率查询编号，当前主机用其配置并核对分频。 */
 #define	CLOCK_ID_SPI3			7             /* 门控位号，用于SPI3模块。 */
 #define	CLOCK_ID_SPI0CACHE		8             /* 门控位号，用于SPI0CACHE模块。 */
 #define	CLOCK_ID_SPI1CACHE		9             /* 门控位号，用于SPI1CACHE模块。 */
@@ -32,7 +32,7 @@
 #define	CLOCK_ID_PWM0			17            /* 门控位号，用于PWM0模块。 */
 #define	CLOCK_ID_AVS			18            /* 门控位号，用于AVS模块。 */
 //#define	CLOCK_ID_TIMER			18
-#define	CLOCK_ID_LRADC			19            /* 门控位号，用于LRADC模块。 */
+#define	CLOCK_ID_LRADC			19    /* 门控位号，用于LRADC模块。 */
 
 #define	CLOCK_ID_CPUTIMER		20    /* 门控位号，用于CPUTIMER模块。 */
 #define	CLOCK_ID_SDMA   		21    /* 门控位号，用于SDMA模块。 */
@@ -116,7 +116,7 @@ int clk_set_rate(int clock_id,  uint32_t rate_hz);
 /**
   * @brief  读取由 HOSC 驱动的 SPI2 时钟分频结果。
   * @param  clock_id：[输入] 外设时钟编号。
-  * @retval SPI2 分频回读结果，单位 Hz；非 HOSC 或其他外设返回 0。
+  * @retval SPI2、SD0、SD1 或 DMA 编号进入同一 SPI2 回读分支，返回其 HOSC 分频结果（Hz）。非 HOSC 源及其他编号返回 0。
   */
 uint32_t clk_get_rate(int clock_id);
 

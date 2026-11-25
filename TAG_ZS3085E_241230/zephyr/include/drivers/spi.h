@@ -118,7 +118,7 @@ struct spi_cs_control {
 	SPI_CS_CONTROL_PTR_DT(DT_DRV_INST(inst), delay_)
 #endif
 
-/* 总线参数。驱动通常通过配置对象地址判断是否重配，原地修改字段可能不被识别；连续调用间不应任意改动配置，仅按接口约定使用保持片选/持锁选项。当前 SPI2 从机专用路径会复位并清除此地址缓存。 */
+/* 总线配置由调用者持有。驱动可按地址缓存模式等字段，LEOPARD SPI2 还单独核对请求频率和分频回读。专用 DMA 入口会主动清理配置缓存。 */
 struct spi_config {
 	uint32_t		frequency;    /* 请求的串行时钟频率，单位 Hz；从机不能据此产生外部时钟。 */
 	uint16_t		operation;    /* 主从、模式、位序、位宽、数据线和片选策略的组合位域。 */
@@ -166,7 +166,7 @@ struct spi_dt_spec {
 	SPI_DT_SPEC_GET(DT_DRV_INST(inst), operation_, delay_)
 #endif
 
-/* 单块缓冲描述；公共 API 允许 buf 为空以表示发送占位或丢弃接收数据，len 仍是字节数。具体驱动可能另有限制，SPI2 CPU 从机要求双向有效且等长。 */
+/* 公共 API 允许空数据指针表示占位发送或丢弃接收，长度按字节计。Actions SPI2 的专用 CPU 全双工主、从分支都要求实际的双向等长缓冲。 */
 struct spi_buf {
 	void *buf;     /* 发送时只读、接收时可写的数据区；空指针语义见结构体说明。 */
 	size_t len;    /* 数据区长度，单位为字节。 */
@@ -197,7 +197,7 @@ typedef int (*spi_api_release)(const struct device *dev,
 
 /* 设备对象的 api 指向这张函数表；SPI_2 在 spi_acts.c 中将同步入口绑定到 spi_acts_transceive。 */
 __subsystem struct spi_driver_api {
-	spi_api_io transceive;                /* 同步收发函数指针。 */
+	spi_api_io transceive;    /* 同步收发函数指针。 */
 #ifdef CONFIG_SPI_ASYNC
 	spi_api_io_async transceive_async;    /* 仅 CONFIG_SPI_ASYNC 构建包含的异步入口。 */
 #endif                                        /* CONFIG_SPI_ASYNC 结构成员分支结束。 */
@@ -283,7 +283,7 @@ static inline int spi_transceive_dt(const struct spi_dt_spec *spec,
   * @param  config：[输入]有效只读配置，不可为空；传输期间不得修改或销毁。
   * @param  rx_bufs：[输入/输出]接收缓冲集合，可为空；非空时数组可读、有效数据区须可写并保持到完成。
   * @retval 公共约定为主机成功返回 0、从机成功可返回接收数据字数，失败返回负 errno；本 SDK 的 Actions CPU 收发成功返回 0。
-  * @note   仅为 spi_transceive 包装；驱动必须支持单向请求，当前 SPI2 CPU 从机专用路径不接受此形式。
+  * @note   调用 spi_transceive，须由驱动支持单向传输。SPI2 专用 CPU 全双工分支要求同时提供等长的收发缓冲。
   */
 static inline int spi_read(const struct device *dev,
 			   const struct spi_config *config,
@@ -315,7 +315,7 @@ static inline int spi_read_dt(const struct spi_dt_spec *spec,
   * @param  config：[输入]有效只读配置，不可为空；传输期间不得修改或销毁。
   * @param  tx_bufs：[输入]发送缓冲集合，可为空；非空时数组及有效数据区须可读并保持到完成。
   * @retval 公共约定为主机成功返回 0、从机成功可返回接收数据字数，失败返回负 errno；本 SDK 的 Actions CPU 收发成功返回 0。
-  * @note   仅为 spi_transceive 包装；驱动必须支持单向请求，当前 SPI2 CPU 从机专用路径不接受此形式。
+  * @note   调用 spi_transceive，须由驱动支持单向传输。SPI2 专用 CPU 全双工分支要求同时提供等长的收发缓冲。
   */
 static inline int spi_write(const struct device *dev,
 			    const struct spi_config *config,

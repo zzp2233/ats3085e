@@ -150,15 +150,15 @@ static const struct acts_pin_config board_pin_config[] = {
 #endif
 
 #if IS_ENABLED(CONFIG_SPI_2)
-    /* SPI 片选（主机侧）。 */
-    PIN_MFP_SET(GPIO_57,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO57 复用为 SPI2 片选，释放自原电机 PWM，避免与振动设备冲突。 */
-    /* SPI 时钟（主机输出）。 */
-    PIN_MFP_SET(GPIO_58,  SPI_MFP_CFG(MFP_SPI2)),                                                           /* GPIO58 复用为 SPI2 SCLK，由本机主机产生时钟。 */
-    /* SPI 主机输入（从机→主机）。 */
-    PIN_MFP_SET(GPIO_59,  ((SPI_MFP_CFG(MFP_SPI2) & ~GPIO_CTL_PADDRV_MASK) | GPIO_CTL_PADDRV_LEVEL(3))),    /* GPIO59 复用为 MISO 输入；先清除原驱动强度字段，再设置为等级 3。 */
+    /* SPI2 四线主机引脚在板级初始化时接入控制器。READY 另用 GPIO61，由应用在会话中配置。 */
+    PIN_MFP_SET(GPIO_57,  SPI_MFP_CFG(MFP_SPI2)),    /* 主机硬件片选 CS# 输出，该脚与原振动 PWM 共用，需避免同时驱动。 */
+    /* 主机在片选有效时提供移位时钟。 */
+    PIN_MFP_SET(GPIO_58,  SPI_MFP_CFG(MFP_SPI2)),    /* 主机输出 SCLK，硬件路径由 SPI2 时钟分频决定节拍。 */
+    /* 主机接收，用于读取从机上一轮准备的应答。 */
+    PIN_MFP_SET(GPIO_59,  ((SPI_MFP_CFG(MFP_SPI2) & ~GPIO_CTL_PADDRV_MASK) | GPIO_CTL_PADDRV_LEVEL(3))),    /* MISO 从 UMA503 输出到本机，复用同时保留这里设置的三级驱动字段。 */
 
-    /* SPI 主机输出（主机→从机）。 */
-    PIN_MFP_SET(GPIO_60,  SPI_MFP_CFG(MFP_SPI2)),    /* GPIO60 复用为 MOSI 输出，向 503 从机发送数据。 */
+    /* 主机发送，与上方接收线在同一时钟下工作。 */
+    PIN_MFP_SET(GPIO_60,  SPI_MFP_CFG(MFP_SPI2)),    /* MOSI 从本机输出到 UMA503，传输期间与 MISO 同步移位。 */
 #endif
 
 #if IS_ENABLED(CONFIG_SPI_3)
@@ -299,8 +299,8 @@ static const struct acts_pin_config board_lcd_pin_config[] = {
 #ifdef CONFIG_ADCKEY_GPIO
 #define CONFIG_ADCKEY_GPIO_NUM (GPIO_21)    /* 模拟按键接 GPIO21。 */
 #else
-#define CONFIG_ADCKEY_WIO_NUM  (WIO_0)      /* 备用方案使用 WIO0。 */
-#define CONFIG_ADCKEY_WIO_MFP  (3)          /* 备用方案的 WIO 复用选择值。 */
+#define CONFIG_ADCKEY_WIO_NUM  (WIO_0)    /* 备用方案使用 WIO0。 */
+#define CONFIG_ADCKEY_WIO_MFP  (3)        /* 备用方案的 WIO 复用选择值。 */
 #endif
 
 /**

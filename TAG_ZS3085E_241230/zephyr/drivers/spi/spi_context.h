@@ -249,7 +249,7 @@ static inline void spi_context_cs_configure(struct spi_context *ctx)
 			     ctx->config->cs->gpio_pin,
 			     spi_context_cs_inactive_value(ctx));
 	} else {
-		LOG_DBG("CS control inhibited (no GPIO device)");    /* 降为 DBG：从机由主机器件驱动片选，此处每帧都会触发，级别调到 INFO 以下才输出。 */
+		LOG_DBG("CS control inhibited (no GPIO device)");    /* 未配置软件片选的 GPIO 设备时仅输出调试日志；硬件片选由控制器驱动另行处理。 */
 	}
 }
 

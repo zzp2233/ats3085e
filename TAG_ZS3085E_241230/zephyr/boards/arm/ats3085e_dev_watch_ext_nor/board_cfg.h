@@ -1,4 +1,4 @@
-/* 板级静态配置：此文件的CONFIG宏选择设备实例、名称、DMA资源及引脚相关参数；不同于运行时spi_config。SPI2当前启用CPU轮询，本机作主机产生SCLK，振动设备关闭以释放GPIO57。头文件保护避免与dev_config.h相互包含时重复展开。 */
+/* 板级设备名称、资源及引脚参数。SPI2 为四线主机，GPIO57 用作硬件片选。普通 API 使用 FIFO；专用入口按需申请两个物理 DMA 通道。 */
 /*
  * Copyright (c) 2015 Intel Corporation
  *
@@ -23,21 +23,21 @@
 #define CONFIG_GPIO_C							1
 #define CONFIG_GPIO_C_NAME      			"GPIOC"    /* 设备绑定或存储选择使用的名称；须与注册实例一致。 */
 #define CONFIG_WIO      						1
-#define CONFIG_WIO_NAME         			"WIO"      /* 设备绑定或存储选择使用的名称；须与注册实例一致。 */
+#define CONFIG_WIO_NAME         			"WIO"    /* 设备绑定或存储选择使用的名称；须与注册实例一致。 */
 #define CONFIG_EXTEND_GPIO						0
-#define CONFIG_EXTEND_GPIO_NAME             "GPIOD"                /* 设备绑定或存储选择使用的名称；须与注册实例一致。 */
+#define CONFIG_EXTEND_GPIO_NAME             "GPIOD"    /* 设备绑定或存储选择使用的名称；须与注册实例一致。 */
 
 #define CONFIG_GPIO_PIN2NAME(x)          (((x) < 32) ? CONFIG_GPIO_A_NAME : (((x) < 64) ? CONFIG_GPIO_B_NAME : CONFIG_GPIO_C_NAME))    /* 按绝对GPIO编号选设备名：0～31为A组，32～63为B组，其余为C组；调用者仍须保证编号有效。 */
 
 #define CONFIG_SPI_FLASH_0						1    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPI_FLASH_NAME      			"spi_flash"
-#define CONFIG_SPI_FLASH_1                      0                            /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_SPI_FLASH_1                      0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPI_FLASH_1_NAME      		"spi_flash_1"
-#define CONFIG_SPI_FLASH_2                      0                            /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_SPI_FLASH_2                      0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPI_FLASH_2_NAME      		"spi_flash_2"
-#define CONFIG_SIM_FLASH                        1                            /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_SIM_FLASH                        1    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SIM_FLASH_NAME               "sim_flash"
-#define CONFIG_ACTLOG_STORAGE_NAME           CONFIG_SPI_FLASH_NAME           /* 设备绑定或存储选择使用的名称；须与注册实例一致。 */
+#define CONFIG_ACTLOG_STORAGE_NAME           CONFIG_SPI_FLASH_NAME    /* 设备绑定或存储选择使用的名称；须与注册实例一致。 */
 
 #define CONFIG_SPINAND_3                    	0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPINAND_FLASH_NAME      	    "spinand"
@@ -76,7 +76,7 @@
 #define CONFIG_SPI_1           					0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPI_1_NAME      				"SPI_1"
 #define CONFIG_SPI_2                            1                    /* 启用板级 SPI2 设备实例。 */
-#define CONFIG_SPI_2_NAME      				"SPI_2"
+#define CONFIG_SPI_2_NAME      				"SPI_2"      /* 设备注册名，与应用获取 SPI2 控制器的名称一致。 */
 #define CONFIG_SPI_3           					0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPI_3_NAME      				"SPI_3"
 
@@ -91,17 +91,17 @@
 #define CONFIG_SPIMT_1_NAME      			"SPIMT_1"
 
 
-#define CONFIG_AUDIO_DAC_0                      1                                      /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_AUDIO_DAC_0                      1    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_AUDIO_DAC_0_NAME             "DAC_0"
 #define CONFIG_AUDIO_ADC_0						          1    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_AUDIO_ADC_0_NAME             "ADC_0"
-#define CONFIG_AUDIO_I2STX_0					          0            /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_AUDIO_I2STX_0					          0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_AUDIO_I2STX_0_NAME           "I2STX_0"
-#define CONFIG_AUDIO_I2SRX_0					          0            /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_AUDIO_I2SRX_0					          0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_AUDIO_I2SRX_0_NAME           "I2SRX_0"
-#define CONFIG_AUDIO_SPDIFRX_0					0                      /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_AUDIO_SPDIFRX_0					0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_AUDIO_SPDIFRX_0_NAME         "SPDIFRX_0"
-#define CONFIG_AUDIO_SPDIFTX_0                  0                                      /* 对应板级设备开关：1配置该实例，0不启用。 */
+#define CONFIG_AUDIO_SPDIFTX_0                  0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_AUDIO_SPDIFTX_0_NAME         "SPDIFTX_0"
 
 #define CONFIG_PANEL							1    /* 对应板级设备开关：1配置该实例，0不启用。 */
@@ -143,9 +143,9 @@
 #define CONFIG_CEC				 				0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_ACTS_BATTERY_NTC 				1
 
-#define CONFIG_UART_0_USE_TX_DMA   1       /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_UART_0_USE_TX_DMA   1    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_UART_0_TX_DMA_CHAN  0x2
-#define CONFIG_UART_0_TX_DMA_ID    1       /* 外设DMA硬件请求槽编号，不是软件通道号。 */
+#define CONFIG_UART_0_TX_DMA_ID    1    /* 外设DMA硬件请求槽编号，不是软件通道号。 */
 #define CONFIG_UART_0_USE_RX_DMA   1
 #define CONFIG_UART_0_RX_DMA_CHAN  0xff    /* DMA通道选择；0xff由驱动申请动态通道。 */
 #define CONFIG_UART_0_RX_DMA_ID    1
@@ -162,23 +162,23 @@
 #define CONFIG_MMC_1_DMA_CHAN       0xff
 #define CONFIG_MMC_1_DMA_ID         6    /* 外设DMA硬件请求槽编号，不是软件通道号。 */
 
-#define CONFIG_PWM_USE_DMA   		1     /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_PWM_USE_DMA   		1    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_PWM_DMA_CHAN  		0xff
 #define CONFIG_PWM_DMA_ID    		21    /* 外设DMA硬件请求槽编号，不是软件通道号。 */
 
-#define CONFIG_I2C_0_USE_DMA   0     /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_I2C_0_USE_DMA   0    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_I2C_0_DMA_CHAN  0xff
 #define CONFIG_I2C_0_DMA_ID    19    /* 外设DMA硬件请求槽编号，不是软件通道号。 */
 
-#define CONFIG_I2C_1_USE_DMA   0     /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_I2C_1_USE_DMA   0    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_I2C_1_DMA_CHAN  0xff
 #define CONFIG_I2C_1_DMA_ID    20    /* 外设DMA硬件请求槽编号，不是软件通道号。 */
 
-#define CONFIG_I2C_2_USE_DMA   0     /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_I2C_2_USE_DMA   0    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_I2C_2_DMA_CHAN  0xff
 #define CONFIG_I2C_2_DMA_ID    24    /* 外设DMA硬件请求槽编号，不是软件通道号。 */
 
-#define CONFIG_I2C_3_USE_DMA   0     /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_I2C_3_USE_DMA   0    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_I2C_3_DMA_CHAN  0xff
 #define CONFIG_I2C_3_DMA_ID    25    /* 外设DMA硬件请求槽编号，不是软件通道号。 */
 
@@ -187,17 +187,17 @@
 #define CONFIG_I2CMT_1_USE_DMA   0    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_I2CMT_1_DMA_CHAN  0xff
 
-#define CONFIG_SPI_1_USE_DMA   1         /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_SPI_1_USE_DMA   1    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_SPI_1_TXDMA_CHAN  0xff
 #define CONFIG_SPI_1_RXDMA_CHAN  0xff    /* DMA通道选择；0xff由驱动申请动态通道。 */
 #define CONFIG_SPI_1_DMA_ID    8
 
-#define CONFIG_SPI_2_USE_DMA   0         /* SPI2 从机使用 CPU FIFO 路径，关闭 DMA 收发。 */
-#define CONFIG_SPI_2_TXDMA_CHAN  0xff
-#define CONFIG_SPI_2_RXDMA_CHAN  0xff    /* DMA通道选择；0xff由驱动申请动态通道。 */
-#define CONFIG_SPI_2_DMA_ID    9
+#define CONFIG_SPI_2_USE_DMA   0         /* 普通 SPI API 使用 CPU FIFO，专用有限帧和循环 PDMA 入口另行申请通道。 */
+#define CONFIG_SPI_2_TXDMA_CHAN  0xff    /* 普通 DMA 配置中 0xff 代表从空闲池申请 TX 通道。 */
+#define CONFIG_SPI_2_RXDMA_CHAN  0xff    /* 普通 DMA 配置中 0xff 代表从空闲池申请 RX 通道。 */
+#define CONFIG_SPI_2_DMA_ID    9         /* SPI2 的 PDMA 外设请求槽号，发送和接收方向共用此编号。 */
 
-#define CONFIG_SPI_3_USE_DMA   1         /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
+#define CONFIG_SPI_3_USE_DMA   1    /* 1使用DMA路径，0使用非DMA路径；仅对应实例启用时生效。 */
 #define CONFIG_SPI_3_TXDMA_CHAN  0xff
 #define CONFIG_SPI_3_RXDMA_CHAN  0xff    /* DMA通道选择；0xff由驱动申请动态通道。 */
 #define CONFIG_SPI_3_DMA_ID    10
@@ -304,8 +304,8 @@ spi nor flash配置
 #define CONFIG_SPI_FLASH_CHIP_SIZE      0x2000000    /* NOR Flash容量，单位字节，当前32 MiB。 */
 #define CONFIG_SPI_FLASH_BUS_WIDTH      4            /* NOR总线数据线数，当前四线。 */
 #define CONFIG_SPI_FLASH_DELAY_CHAIN    (28)  //每档0.25 ns
-#define CONFIG_SPI_FLASH_NO_IRQ_LOCK    1            /* NOR访问的中断锁配置开关，1选择不加该锁。 */
-#define CONFIG_SPI_FLASH_FREQ_MHZ    	100          /* NOR请求时钟，单位MHz。 */
+#define CONFIG_SPI_FLASH_NO_IRQ_LOCK    1      /* NOR访问的中断锁配置开关，1选择不加该锁。 */
+#define CONFIG_SPI_FLASH_FREQ_MHZ    	100    /* NOR请求时钟，单位MHz。 */
 
 //#define CONFIG_SPI0_NOR_DTR_MODE
 //#define CONFIG_SPI0_NOR_QPI_MODE
@@ -336,9 +336,9 @@ mmc板级配置
 #define CONFIG_MMC_0_ENABLE_SDIO_IRQ 0                    /* 1使能SD0的SDIO中断 */
 
 
-#define CONFIG_MMC_1_BUS_WIDTH      4     /* 总线数据线数。 */
+#define CONFIG_MMC_1_BUS_WIDTH      4    /* 总线数据线数。 */
 #define CONFIG_MMC_1_CLKSEL         0
-#define CONFIG_MMC_1_DATA_REG_WIDTH 1     /* 数据寄存器访问宽度，单位字节。 */
+#define CONFIG_MMC_1_DATA_REG_WIDTH 1    /* 数据寄存器访问宽度，单位字节。 */
 #define CONFIG_MMC_1_MFP
 #define CONFIG_MMC_1_USE_GPIO_IRQ   0     /* 1使用GPIO中断辅助卡检测，0关闭该方案。 */
 #define CONFIG_MMC_1_ENABLE_SDIO_IRQ 0    /* 1使能SD1的SDIO中断 */

@@ -1,7 +1,7 @@
 /**
  * @file
  *
- * @brief Public APIs for the DMA drivers.
+ * @brief DMA 控制器公共接口，SPI2 的物理通道操作经设备函数表分派。
  */
 
 /*
@@ -22,555 +22,526 @@ extern "C" {
 
 
 /**
- * @brief DMA Interface
- * @defgroup dma_interface DMA Interface
+ * @brief DMA 公共接口
+ * @defgroup dma_interface DMA 公共接口
  * @ingroup io_interfaces
  * @{
  */
 
 enum dma_channel_direction {
-	MEMORY_TO_MEMORY = 0x0,
-	MEMORY_TO_PERIPHERAL,
-	PERIPHERAL_TO_MEMORY,
-	PERIPHERAL_TO_PERIPHERAL /*only supported in NXP EDMA*/
+	MEMORY_TO_MEMORY = 0x0,     /* 内存到内存。 */
+	MEMORY_TO_PERIPHERAL,       /* 内存到外设，SPI 用于 TX。 */
+	PERIPHERAL_TO_MEMORY,       /* 外设到内存，SPI 用于 RX。 */
+	PERIPHERAL_TO_PERIPHERAL    /* 外设到外设，原接口说明限 NXP EDMA。 */
 };
 
-/** Valid values for @a source_addr_adj and @a dest_addr_adj */
+/** 源端或目的端地址的步进方式。 */
 enum dma_addr_adj {
-	DMA_ADDR_ADJ_INCREMENT,
-	DMA_ADDR_ADJ_DECREMENT,
-	DMA_ADDR_ADJ_NO_CHANGE,
+	DMA_ADDR_ADJ_INCREMENT,    /* 每个元素结束后地址递增。 */
+	DMA_ADDR_ADJ_DECREMENT,    /* 地址递减。 */
+	DMA_ADDR_ADJ_NO_CHANGE,    /* 地址保持固定，适合外设数据寄存器。 */
 };
 
-/* channel attributes */
+/* 通用分配器可使用的通道筛选条件。 */
 enum dma_channel_filter {
-	DMA_CHANNEL_NORMAL, /* normal DMA channel */
-	DMA_CHANNEL_PERIODIC, /* can be triggerred by periodic sources */
+	DMA_CHANNEL_NORMAL,      /* 普通搬运通道。 */
+	DMA_CHANNEL_PERIODIC,    /* 可由周期性源触发的通道。 */
 };
 
-/**
- * @struct dma_block_config
- * @brief DMA block configuration structure.
- *
- * @param source_address is block starting address at source
- * @param source_gather_interval is the address adjustment at gather boundary
- * @param dest_address is block starting address at destination
- * @param dest_scatter_interval is the address adjustment at scatter boundary
- * @param dest_scatter_count is the continuous transfer count between scatter
- *                    boundaries
- * @param source_gather_count is the continuous transfer count between gather
- *                     boundaries
- *
- * @param block_size is the number of bytes to be transferred for this block.
- *
- * @param config is a bit field with the following parts:
- *
- *     source_gather_en   [ 0 ]       - 0-disable, 1-enable.
- *     dest_scatter_en    [ 1 ]       - 0-disable, 1-enable.
- *     source_addr_adj    [ 2 : 3 ]   - 00-increment, 01-decrement,
- *                                      10-no change.
- *     dest_addr_adj      [ 4 : 5 ]   - 00-increment, 01-decrement,
- *                                      10-no change.
- *     source_reload_en   [ 6 ]       - reload source address at the end of
- *                                      block transfer
- *                                      0-disable, 1-enable.
- *     dest_reload_en     [ 7 ]       - reload destination address at the end
- *                                      of block transfer
- *                                      0-disable, 1-enable.
- *     fifo_mode_control  [ 8 : 11 ]  - How full  of the fifo before transfer
- *                                      start. HW specific.
- *     flow_control_mode  [ 12 ]      - 0-source request served upon data
- *                                        availability.
- *                                      1-source request postponed until
- *                                        destination request happens.
- *     reserved           [ 13 : 15 ]
- */
+/** @brief 单块搬运描述。两端地址、块长和可选重载描述一次连续传输；具体字段是否生效由控制器决定。 */
 struct dma_block_config {
 #ifdef CONFIG_DMA_64BIT
-	uint64_t source_address;
-	uint64_t dest_address;
+	uint64_t source_address;    /* 64 位源总线地址。 */
+	uint64_t dest_address;      /* 64 位目的总线地址。 */
 #else
-	uint32_t source_address;
-	uint32_t dest_address;
+	uint32_t source_address;    /* 32 位源总线地址。 */
+	uint32_t dest_address;      /* 32 位目的总线地址。 */
 #endif
-	uint32_t source_gather_interval;
-	uint32_t dest_scatter_interval;
-	uint16_t dest_scatter_count;
-	uint16_t source_gather_count;
-	uint32_t block_size;
-	struct dma_block_config *next_block;
-	uint16_t  source_gather_en :  1;
-	uint16_t  dest_scatter_en :   1;
-	uint16_t  source_addr_adj :   2;
-	uint16_t  dest_addr_adj :     2;
-	uint16_t  source_reload_en :  1;
-	uint16_t  dest_reload_en :    1;
-	uint16_t  fifo_mode_control : 4;
-	uint16_t  flow_control_mode : 1;
-	uint16_t  reserved :          3;
+	uint32_t source_gather_interval;        /* 到达聚集边界后对源地址作的调整。 */
+	uint32_t dest_scatter_interval;         /* 到达分散边界后对目的地址作的调整。 */
+	uint16_t dest_scatter_count;            /* 相邻分散边界之间连续传输的数量。 */
+	uint16_t source_gather_count;           /* 相邻聚集边界之间连续传输的数量。 */
+	uint32_t block_size;                    /* 本块实际传输字节数。 */
+	struct dma_block_config *next_block;    /* 后续块，可为空，须由硬件驱动支持。 */
+	uint16_t  source_gather_en :  1;        /* 启用源端聚集。 */
+	uint16_t  dest_scatter_en :   1;        /* 启用目的端分散。 */
+	uint16_t  source_addr_adj :   2;        /* 源地址每元素步进方式。 */
+	uint16_t  dest_addr_adj :     2;        /* 目的地址每元素步进方式。 */
+	uint16_t  source_reload_en :  1;        /* 块结束时重载源地址。 */
+	uint16_t  dest_reload_en :    1;        /* 块结束时重载目的地址，SPI2 用此字段保持持续接收。 */
+	uint16_t  fifo_mode_control : 4;        /* 启动传输所需的 FIFO 填充程度，编码取决于硬件。 */
+	uint16_t  flow_control_mode : 1;        /* 选择源端就绪或等待目的端请求的流控方式。 */
+	uint16_t  reserved :          3;        /* 保留位，初始化清零。 */
 };
 
-/**
- * @typedef dma_callback_t
- * @brief Callback function for DMA transfer completion
- *
- *  If enabled, callback function will be invoked at transfer completion
- *  or when error happens.
- *
- * @param dev Pointer to the DMA device calling the callback.
- * @param user_data A pointer to some user data or NULL
- * @param channel The channel number
- * @param status 0 on success, a negative errno otherwise
- */
+/** @brief 驱动在完成或错误时通知调用者。dev 和 channel 标识硬件，user_data 由配置传入并需保持有效。Actions PDMA ISR 用 status=1 表示半程、0 表示完成，无返回值。 */
 typedef void (*dma_callback_t)(const struct device *dev, void *user_data,
 			       uint32_t channel, int status);
 
-/**
- * @struct dma_config
- * @brief DMA configuration structure.
- *
- * @param dma_slot             [ 0 : 6 ]   - which peripheral and direction
- *                                        (HW specific)
- * @param channel_direction    [ 7 : 9 ]   - 000-memory to memory,
- *                                        001-memory to peripheral,
- *                                        010-peripheral to memory,
- *                                        011-peripheral to peripheral,
- *                                        ...
- * @param complete_callback_en [ 10 ]       - 0-callback invoked at completion only
- *                                        1-callback invoked at completion of
- *                                          each block
- * @param error_callback_en    [ 11 ]      - 0-error callback enabled
- *                                        1-error callback disabled
- * @param source_handshake     [ 12 ]      - 0-HW, 1-SW
- * @param dest_handshake       [ 13 ]      - 0-HW, 1-SW
- * @param channel_priority     [ 14 : 17 ] - DMA channel priority
- * @param source_chaining_en   [ 18 ]      - enable/disable source block chaining
- *                                        0-disable, 1-enable
- * @param dest_chaining_en     [ 19 ]      - enable/disable destination block
- *                                        chaining.
- *                                        0-disable, 1-enable
- * @param linked_channel       [ 20 : 26 ] - after channel count exhaust will
- *                                        initiate a channel service request
- *                                        at this channel
- * @param reserved             [ 27 : 31 ]
- * @param source_data_size    [ 0 : 15 ]   - width of source data (in bytes)
- * @param dest_data_size      [ 16 : 31 ]  - width of dest data (in bytes)
- * @param source_burst_length [ 0 : 15 ]   - number of source data units
- * @param dest_burst_length   [ 16 : 31 ]  - number of destination data units
- * @param block_count  is the number of blocks used for block chaining, this
- *     depends on availability of the DMA controller.
- * @param user_data  private data from DMA client.
- * @param dma_callback see dma_callback_t for details
- */
+/** @brief 通道配置。请求源与传输方向共同确定哪一侧连接外设，从 head_block 取得块描述。Actions PDMA 在 dma_config 中立即写入寄存器。 */
 struct dma_config {
-	uint32_t  dma_slot :             7;
-	uint32_t  channel_direction :    3;
-	uint32_t  complete_callback_en : 1;
-	uint32_t  error_callback_en :    1;
-	uint32_t  source_handshake :     1;
-	uint32_t  dest_handshake :       1;
-	uint32_t  channel_priority :     4;
-	uint32_t  source_chaining_en :   1;
-	uint32_t  dest_chaining_en :     1;
-	uint32_t  linked_channel   :     7;
-	uint32_t  reserved :             5;
-	uint32_t  source_data_size :    16;
-	uint32_t  dest_data_size :      16;
-	uint32_t  source_burst_length : 16;
-	uint32_t  dest_burst_length :   16;
-	uint32_t block_count;
-	struct dma_block_config *head_block;
-	void *user_data;
-	dma_callback_t dma_callback;
+	uint32_t  dma_slot :             7;     /* 硬件 DMA 请求槽号。 */
+	uint32_t  channel_direction :    3;     /* 选择内存与外设之间的数据流方向。 */
+	uint32_t  complete_callback_en : 1;     /* 完成回调策略，具体中断映射见目标驱动。 */
+	uint32_t  error_callback_en :    1;     /* 错误回调配置位，实际通知依控制器支持。 */
+	uint32_t  source_handshake :     1;     /* 源端握手，0 为硬件，1 为软件。 */
+	uint32_t  dest_handshake :       1;     /* 目的端握手，0 为硬件，1 为软件。 */
+	uint32_t  channel_priority :     4;     /* 硬件通道优先级。 */
+	uint32_t  source_chaining_en :   1;     /* 源端是否启用通道链接。 */
+	uint32_t  dest_chaining_en :     1;     /* 目的端是否启用通道链接。 */
+	uint32_t  linked_channel   :     7;     /* 计数耗尽时可触发的下一通道。 */
+	uint32_t  reserved :             5;     /* 平台扩展保留位，Actions 音频路径读取此字段。 */
+	uint32_t  source_data_size :    16;     /* 源元素字节数。 */
+	uint32_t  dest_data_size :      16;     /* 目的元素字节数。 */
+	uint32_t  source_burst_length : 16;     /* 每次突发包含的源元素数。 */
+	uint32_t  dest_burst_length :   16;     /* 每次突发包含的目的元素数。 */
+	uint32_t block_count;                   /* 链中块的个数，受驱动支持能力限制。 */
+	struct dma_block_config *head_block;    /* 首块描述的地址，PDMA 配置时同步读取。 */
+	void *user_data;                        /* 回调上下文，由应用管理生命周期。 */
+	dma_callback_t dma_callback;            /* 完成或异常时驱动可调用的通知函数。 */
 };
 
-/**
- * DMA runtime status structure
- *
- * busy 			- is current DMA transfer busy or idle
- * dir				- DMA transfer direction
- * pending_length 		- data length pending to be transferred in bytes
- * 					or platform dependent.
- *
- */
+/** @brief 当前通道状态。通道预留和正在搬运是不同状态，pending_length 的可见性由具体实现决定。 */
 struct dma_status {
-	bool busy;
-	enum dma_channel_direction dir;
-	uint32_t pending_length;
+	bool busy;                         /* 驱动观察到的运行状态。 */
+	enum dma_channel_direction dir;    /* 已配置的传输方向。 */
+	uint32_t pending_length;           /* 驱动报告的剩余长度，字节数由目标实现提供。 */
 };
 
-/**
- * DMA context structure
- * Note: the dma_context shall be the first member
- *       of DMA client driver Data, got by dev->data
- *
- * magic			- magic code to identify the context
- * dma_channels		- dma channels
- * atomic			- driver atomic_t pointer
- *
- */
+/** @brief 通用原子位图分配器的设备上下文，适用驱动需将它放在设备 data 首部。Actions 物理通道走设备自己的 request/free。 */
 struct dma_context {
-	int32_t magic;
-	int dma_channels;
-	atomic_t *atomic;
+	int32_t magic;       /* 校验 data 布局是否符合通用分配器约定。 */
+	int dma_channels;    /* 通用分配器中可索引的通道数。 */
+	atomic_t *atomic;    /* 原子位图，置位表示已预留。 */
 };
 
-/* magic code to identify context content */
+/* 用魔数检查设备 data 首部是否为公共位图上下文。 */
 #define DMA_MAGIC 0x47494749
 
 /**
  * @cond INTERNAL_HIDDEN
  *
- * These are for internal use only, so skip these in
- * public documentation.
+ * 以下函数指针构成驱动内部操作表，外部通常通过包装接口访问。
  */
+/**
+  * @brief  为指定通道提交请求源、方向及块描述。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  config：[输入]非空配置，首块必须有效；回调使用的数据须延续至停机。
+  * @retval 0 表示配置成功，负数由驱动返回。
+  * @note   不隐式启动通道，PDMA 仅使用首块。
+  */
 typedef int (*dma_api_config)(const struct device *dev, uint32_t channel,
 			      struct dma_config *config);
 
 #ifdef CONFIG_DMA_64BIT
+/**
+  * @brief  更新已分配通道的源、目的和块长度。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  src：[输入]源总线地址。
+  * @param  dst：[输入]目的总线地址。
+  * @param  size：[输入]新的传输字节数。
+  * @retval 0 为成功，包装层在缺少 reload 时返回 -ENOSYS，其他错误来自驱动。
+  * @note   CONFIG_DMA_64BIT 决定地址类型，调用方遵守驱动对重配时机的要求。
+  */
 typedef int (*dma_api_reload)(const struct device *dev, uint32_t channel,
 			      uint64_t src, uint64_t dst, size_t size);
 #else
+/**
+  * @brief  更新已分配通道的源、目的和块长度。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  src：[输入]源总线地址。
+  * @param  dst：[输入]目的总线地址。
+  * @param  size：[输入]新的传输字节数。
+  * @retval 0 为成功，包装层在缺少 reload 时返回 -ENOSYS，其他错误来自驱动。
+  * @note   CONFIG_DMA_64BIT 决定地址类型，调用方遵守驱动对重配时机的要求。
+  */
 typedef int (*dma_api_reload)(const struct device *dev, uint32_t channel,
 			      uint32_t src, uint32_t dst, size_t size);
 #endif
 
+/**
+  * @brief  使配置好的通道可以响应搬运请求。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 0 为启动成功，负数来自驱动。
+  * @note   外设请求开关和线路完成状态须由外设调用方协调。
+  */
 typedef int (*dma_api_start)(const struct device *dev, uint32_t channel);
 
+/**
+  * @brief  请求控制器停止指定通道。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 0 为驱动接受停止，负数为错误。
+  * @note   不负责释放通道；Actions PDMA 的实现清 START，SPI2 专用入口另行检查回读。
+  */
 typedef int (*dma_api_stop)(const struct device *dev, uint32_t channel);
 
+/**
+  * @brief  获取驱动可观察到的搬运状态。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  status：[输出]非空可写的状态对象。
+  * @retval 0 表示成功，未实现返回 -ENOSYS，其他负值来自驱动。
+  * @note   Actions 在 START 清零时令 pending_length 为零，独立帧完整性判断还需要硬件 RC。
+  */
 typedef int (*dma_api_get_status)(const struct device *dev, uint32_t channel,
 				  struct dma_status *status);
+/**
+  * @brief  通过设备分配接口预留物理通道。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 成功返回通道编号，负数为驱动错误；Actions PDMA 以 -EINVAL 报告无可用通道。
+  * @note   该驱动接受 0xff 自动选择，SPI2 分别申请 RX 与 TX。
+  */
 typedef int (*dma_api_request)(const struct device *dev, uint32_t channel);
+/**
+  * @brief  将物理通道归还给分配器。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 无。
+  * @note   调用方先停止通道并确认不再访问缓冲。
+  */
 typedef void (*dma_api_free)(const struct device *dev, uint32_t channel);
 
 
-/**
- * @typedef dma_chan_filter
- * @brief channel filter function call
- *
- * filter function that is used to find the matched internal dma channel
- * provide by caller
- *
- * @param dev Pointer to the DMA device instance
- * @param channel the channel id to use
- * @param filter_param filter function parameter, can be NULL
- *
- * @retval True on filter matched otherwise return False.
- */
+/** @brief 可选驱动筛选器。dev 和 channel 为候选设备与通道，filter_param 原样来自请求方；返回真表示符合筛选。 */
 typedef bool (*dma_api_chan_filter)(const struct device *dev,
 				int channel, void *filter_param);
 
 __subsystem struct dma_driver_api {
-	dma_api_config config;
-	dma_api_reload reload;
-	dma_api_start start;
-	dma_api_stop stop;
-	dma_api_get_status get_status;
-	dma_api_request request;
-	dma_api_free free;
-	dma_api_chan_filter chan_filter;
+	dma_api_config config;              /* 通道配置入口，由具体控制器注册。 */
+	dma_api_reload reload;              /* 源、目的地址与块长重装入口，由具体控制器注册。 */
+	dma_api_start start;                /* 启动入口，由具体控制器注册。 */
+	dma_api_stop stop;                  /* 停机入口，由具体控制器注册。 */
+	dma_api_get_status get_status;      /* 状态查询入口，由具体控制器注册。 */
+	dma_api_request request;            /* 预留物理通道入口，由具体控制器注册。 */
+	dma_api_free free;                  /* 归还物理通道入口，由具体控制器注册。 */
+	dma_api_chan_filter chan_filter;    /* 可选通道筛选入口，由具体控制器注册。 */
 };
 
 
+/**
+  * @brief  通过设备分配接口预留物理通道。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 成功返回通道编号，负数为驱动错误；Actions PDMA 以 -EINVAL 报告无可用通道。
+  * @note   该驱动接受 0xff 自动选择，SPI2 分别申请 RX 与 TX。
+  */
 static inline int dma_request(const struct device *dev, uint32_t channel)
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
-	return api->request(dev, channel);
+		(const struct dma_driver_api *)dev->api;    /* 取得绑定设备的 DMA 操作表。 */
+	return api->request(dev, channel);                  /* 直接委派设备所提供的分配器，获得实际通道号。 */
 }
 
+/**
+  * @brief  将物理通道归还给分配器。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 无。
+  * @note   调用方先停止通道并确认不再访问缓冲。
+  */
 static inline void dma_free(const struct device *dev, uint32_t channel)
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
-	api->free(dev, channel);
+		(const struct dma_driver_api *)dev->api;    /* 取得绑定设备的 DMA 操作表。 */
+	api->free(dev, channel);                            /* 将所有权交回与申请配对的设备接口。 */
 }
 
 /**
  * @endcond
  */
 
+
 /**
- * @brief Configure individual channel for DMA transfer.
- *
- * @param dev     Pointer to the device structure for the driver instance.
- * @param channel Numeric identification of the channel to configure
- * @param config  Data structure containing the intended configuration for the
- *                selected channel
- *
- * @retval 0 if successful.
- * @retval Negative errno code if failure.
- */
+  * @brief  为指定通道提交请求源、方向及块描述。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  config：[输入]非空配置，首块必须有效；回调使用的数据须延续至停机。
+  * @retval 0 表示配置成功，负数由驱动返回。
+  * @note   不隐式启动通道，PDMA 仅使用首块。
+  */
 static inline int dma_config(const struct device *dev, uint32_t channel,
 			     struct dma_config *config)
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
+		(const struct dma_driver_api *)dev->api;    /* 取得绑定设备的 DMA 操作表。 */
 
-	return api->config(dev, channel, config);
+	return api->config(dev, channel, config);           /* 调用对应驱动配置函数，同步返回配置错误。 */
 }
 
-/**
- * @brief Reload buffer(s) for a DMA channel
- *
- * @param dev     Pointer to the device structure for the driver instance.
- * @param channel Numeric identification of the channel to configure
- *                selected channel
- * @param src     source address for the DMA transfer
- * @param dst     destination address for the DMA transfer
- * @param size    size of DMA transfer
- *
- * @retval 0 if successful.
- * @retval Negative errno code if failure.
- */
+
 #ifdef CONFIG_DMA_64BIT
+/**
+  * @brief  更新已分配通道的源、目的和块长度。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  src：[输入]源总线地址。
+  * @param  dst：[输入]目的总线地址。
+  * @param  size：[输入]新的传输字节数。
+  * @retval 0 为成功，包装层在缺少 reload 时返回 -ENOSYS，其他错误来自驱动。
+  * @note   CONFIG_DMA_64BIT 决定地址类型，调用方遵守驱动对重配时机的要求。
+  */
 static inline int dma_reload(const struct device *dev, uint32_t channel,
 			     uint64_t src, uint64_t dst, size_t size)
 #else
+/**
+  * @brief  更新已分配通道的源、目的和块长度。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  src：[输入]源总线地址。
+  * @param  dst：[输入]目的总线地址。
+  * @param  size：[输入]新的传输字节数。
+  * @retval 0 为成功，包装层在缺少 reload 时返回 -ENOSYS，其他错误来自驱动。
+  * @note   CONFIG_DMA_64BIT 决定地址类型，调用方遵守驱动对重配时机的要求。
+  */
 static inline int dma_reload(const struct device *dev, uint32_t channel,
 		uint32_t src, uint32_t dst, size_t size)
 #endif
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
+		(const struct dma_driver_api *)dev->api;             /* 取得绑定设备的 DMA 操作表。 */
 
-	if (api->reload) {
-		return api->reload(dev, channel, src, dst, size);
+	if (api->reload) {                                           /* 检查可选重装接口是否存在。 */
+		return api->reload(dev, channel, src, dst, size);    /* 按当前地址宽度传递源、目的地址和新字节数。 */
 	}
 
-	return -ENOSYS;
+	return -ENOSYS;                                              /* 驱动未提供此可选操作。 */
 }
 
+
 /**
- * @brief Enables DMA channel and starts the transfer, the channel must be
- *        configured beforehand.
- *
- * Implementations must check the validity of the channel ID passed in and
- * return -EINVAL if it is invalid.
- *
- * @param dev     Pointer to the device structure for the driver instance.
- * @param channel Numeric identification of the channel where the transfer will
- *                be processed
- *
- * @retval 0 if successful.
- * @retval Negative errno code if failure.
- */
+  * @brief  使配置好的通道可以响应搬运请求。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 0 为启动成功，负数来自驱动。
+  * @note   外设请求开关和线路完成状态须由外设调用方协调。
+  */
 __syscall int dma_start(const struct device *dev, uint32_t channel);
 
+/**
+  * @brief  使配置好的通道可以响应搬运请求。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 0 为启动成功，负数来自驱动。
+  * @note   外设请求开关和线路完成状态须由外设调用方协调。
+  */
 static inline int z_impl_dma_start(const struct device *dev, uint32_t channel)
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
+		(const struct dma_driver_api *)dev->api;    /* 取得绑定设备的 DMA 操作表。 */
 
-	return api->start(dev, channel);
+	return api->start(dev, channel);                    /* 由当前控制器实际写入通道启动配置。 */
 }
 
+
 /**
- * @brief Stops the DMA transfer and disables the channel.
- *
- * Implementations must check the validity of the channel ID passed in and
- * return -EINVAL if it is invalid.
- *
- * @param dev     Pointer to the device structure for the driver instance.
- * @param channel Numeric identification of the channel where the transfer was
- *                being processed
- *
- * @retval 0 if successful.
- * @retval Negative errno code if failure.
- */
+  * @brief  请求控制器停止指定通道。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 0 为驱动接受停止，负数为错误。
+  * @note   不负责释放通道；Actions PDMA 的实现清 START，SPI2 专用入口另行检查回读。
+  */
 __syscall int dma_stop(const struct device *dev, uint32_t channel);
 
+/**
+  * @brief  请求控制器停止指定通道。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 0 为驱动接受停止，负数为错误。
+  * @note   不负责释放通道；Actions PDMA 的实现清 START，SPI2 专用入口另行检查回读。
+  */
 static inline int z_impl_dma_stop(const struct device *dev, uint32_t channel)
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
+		(const struct dma_driver_api *)dev->api;    /* 取得绑定设备的 DMA 操作表。 */
 
-	return api->stop(dev, channel);
+	return api->stop(dev, channel);                     /* 向设备提交停止请求并透传状态。 */
 }
 
+
 /**
- * @brief request DMA channel.
- *
- * request DMA channel resources
- * return -EINVAL if there is no valid channel available.
- *
- * @param dev Pointer to the device structure for the driver instance.
- * @param filter_param filter function parameter
- *
- * @retval dma channel if successful.
- * @retval Negative errno code if failure.
- */
+  * @brief  尝试从通用位图中原子取得符合筛选条件的通道。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  filter_param：[输入]可选的驱动筛选参数，其格式由驱动约定。
+  * @retval 未取到候选或上下文无效时初值为 -EINVAL；返回最后记录的候选号。
+  * @note   若最后候选被筛选拒绝，位图会释放该位，但局部 channel 仍保留此前编号。SPI2 使用私有物理通道分配入口。
+  */
 __syscall int dma_request_channel(const struct device *dev,
 				  void *filter_param);
 
+/**
+  * @brief  尝试从通用位图中原子取得符合筛选条件的通道。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  filter_param：[输入]可选的驱动筛选参数，其格式由驱动约定。
+  * @retval 未取到候选或上下文无效时初值为 -EINVAL；返回最后记录的候选号。
+  * @note   若最后候选被筛选拒绝，位图会释放该位，但局部 channel 仍保留此前编号。SPI2 使用私有物理通道分配入口。
+  */
 static inline int z_impl_dma_request_channel(const struct device *dev,
 					     void *filter_param)
 {
-	int i = 0;
-	int channel = -EINVAL;
+	int i = 0;                                                              /* 从通道零开始扫描。 */
+	int channel = -EINVAL;                                                  /* 暂未获得候选，初值用于无分配结果。 */
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
-	/* dma_context shall be the first one in dev data */
+		(const struct dma_driver_api *)dev->api;                        /* 取得绑定设备的 DMA 操作表。 */
+	/* 通用分配器仅接受把 dma_context 放在 data 首部的驱动。 */
 	struct dma_context *dma_ctx = (struct dma_context *)dev->data;
 
 	if (dma_ctx->magic != DMA_MAGIC) {
-		return channel;
+		return channel;                                                 /* 设备未提供通用布局，返回初始错误。 */
 	}
 
-	for (i = 0; i < dma_ctx->dma_channels; i++) {
-		if (!atomic_test_and_set_bit(dma_ctx->atomic, i)) {
-			channel = i;
+	for (i = 0; i < dma_ctx->dma_channels; i++) {                           /* 遍历位图内的所有有效编号。 */
+		if (!atomic_test_and_set_bit(dma_ctx->atomic, i)) {             /* 原子尝试置位，旧值为零时当前调用取得该候选。 */
+			channel = i;                                            /* 先记下候选编号，再调用可能拒绝它的筛选器。 */
 			if (api->chan_filter &&
-			    !api->chan_filter(dev, channel, filter_param)) {
-				atomic_clear_bit(dma_ctx->atomic, channel);
-				continue;
+			    !api->chan_filter(dev, channel, filter_param)) {    /* 仅当有筛选器且拒绝此候选时撤销预留。 */
+				atomic_clear_bit(dma_ctx->atomic, channel);     /* 释放不符合条件的候选。 */
+				continue;                                       /* 继续检查余下通道，局部 channel 未在此复位。 */
 			}
-			break;
+			break;                                                  /* 符合条件的候选已占用，结束扫描。 */
 		}
 	}
 
-	return channel;
+	return channel;                                                         /* 返回最后记下的编号或初始错误。 */
 }
 
+
 /**
- * @brief release DMA channel.
- *
- * release DMA channel resources
- *
- * @param dev  Pointer to the device structure for the driver instance.
- * @param channel  channel number
- *
- */
+  * @brief  清除通用位图的通道预留位。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 无。
+  * @note   魔数不匹配或通道超界时直接返回，不操作硬件。
+  */
 __syscall void dma_release_channel(const struct device *dev,
 				   uint32_t channel);
 
+/**
+  * @brief  清除通用位图的通道预留位。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @retval 无。
+  * @note   魔数不匹配或通道超界时直接返回，不操作硬件。
+  */
 static inline void z_impl_dma_release_channel(const struct device *dev,
 					      uint32_t channel)
 {
 	struct dma_context *dma_ctx = (struct dma_context *)dev->data;
 
 	if (dma_ctx->magic != DMA_MAGIC) {
-		return;
+		return;                                        /* 布局不匹配时不更改位图。 */
 	}
 
 	if (channel < dma_ctx->dma_channels) {
-		atomic_clear_bit(dma_ctx->atomic, channel);
+		atomic_clear_bit(dma_ctx->atomic, channel);    /* 在合法范围内原子归还通道。 */
 	}
 
 }
 
+
 /**
- * @brief DMA channel filter.
- *
- * filter channel by attribute
- *
- * @param dev  Pointer to the device structure for the driver instance.
- * @param channel  channel number
- * @param filter_param filter attribute
- *
- * @retval Negative errno code if not support
- *
- */
+  * @brief  调用驱动筛选器检查通道是否符合参数要求。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  filter_param：[输入]可空的不透明过滤条件，具体含义由驱动决定。
+  * @retval 有实现时返回其布尔结果（0 或 1），未提供时返回 -ENOSYS。
+  * @note   不申请也不释放通道。
+  */
 __syscall int dma_chan_filter(const struct device *dev,
 				   int channel, void *filter_param);
 
+/**
+  * @brief  调用驱动筛选器检查通道是否符合参数要求。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  filter_param：[输入]可空的不透明过滤条件，具体含义由驱动决定。
+  * @retval 有实现时返回其布尔结果（0 或 1），未提供时返回 -ENOSYS。
+  * @note   不申请也不释放通道。
+  */
 static inline int z_impl_dma_chan_filter(const struct device *dev,
 					      int channel, void *filter_param)
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
+		(const struct dma_driver_api *)dev->api;                /* 取得绑定设备的 DMA 操作表。 */
 
 	if (api->chan_filter) {
-		return api->chan_filter(dev, channel, filter_param);
+		return api->chan_filter(dev, channel, filter_param);    /* 返回驱动对候选通道的布尔判定。 */
 	}
 
-	return -ENOSYS;
+	return -ENOSYS;                                                 /* 该控制器未提供筛选实现。 */
 }
 
+
 /**
- * @brief get current runtime status of DMA transfer
- *
- * Implementations must check the validity of the channel ID passed in and
- * return -EINVAL if it is invalid or -ENOSYS if not supported.
- *
- * @param dev     Pointer to the device structure for the driver instance.
- * @param channel Numeric identification of the channel where the transfer was
- *                being processed
- * @param stat   a non-NULL dma_status object for storing DMA status
- *
- * @retval non-negative if successful.
- * @retval Negative errno code if failure.
- */
+  * @brief  获取驱动可观察到的搬运状态。
+  * @param  dev：[输入]有效 DMA 设备，实例的 api 指向对应驱动。
+  * @param  channel：[输入]物理或逻辑通道编号，由所选驱动约定。
+  * @param  stat：[输出]非空可写的状态对象。
+  * @retval 0 表示成功，未实现返回 -ENOSYS，其他负值来自驱动。
+  * @note   Actions 在 START 清零时令 pending_length 为零，独立帧完整性判断还需要硬件 RC。
+  */
 static inline int dma_get_status(const struct device *dev, uint32_t channel,
 				 struct dma_status *stat)
 {
 	const struct dma_driver_api *api =
-		(const struct dma_driver_api *)dev->api;
+		(const struct dma_driver_api *)dev->api;       /* 取得绑定设备的 DMA 操作表。 */
 
 	if (api->get_status) {
-		return api->get_status(dev, channel, stat);
+		return api->get_status(dev, channel, stat);    /* 通过设备函数表填入调用者提供的状态对象。 */
 	}
 
-	return -ENOSYS;
+	return -ENOSYS;                                        /* 可选状态查询未实现。 */
 }
 
+
 /**
- * @brief Look-up generic width index to be used in registers
- *
- * WARNING: This look-up works for most controllers, but *may* not work for
- *          yours.  Ensure your controller expects the most common register
- *          bit values before using this convenience function.  If your
- *          controller does not support these values, you will have to write
- *          your own look-up inside the controller driver.
- *
- * @param size: width of bus (in bytes)
- *
- * @retval common DMA index to be placed into registers.
- */
+  * @brief  把以字节表示的位宽映射到通用索引。
+  * @param  size：[输入]1～32 字节，须为二的幂。
+  * @retval 无效时为 0，否则返回最高置位的位置。
+  * @note   使用前须确认本控制器期待此编码。
+  */
 static inline uint32_t dma_width_index(uint32_t size)
 {
-	/* Check boundaries (max supported width is 32 Bytes) */
+	/* 宽度允许范围为 1～32 字节。 */
 	if (size < 1 || size > 32) {
-		return 0; /* Zero is the default (8 Bytes) */
+		return 0;             /* 宽度越界时返回默认索引。 */
 	}
 
-	/* Ensure size is a power of 2 */
+	/* 只有二的幂能映射为单一宽度编码。 */
 	if (!is_power_of_two(size)) {
-		return 0; /* Zero is the default (8 Bytes) */
+		return 0;             /* 不能用单一指数编码非二次幂宽度。 */
 	}
 
-	/* Convert to bit pattern for writing to a register */
-	return find_msb_set(size);
+	/* 返回最高置位的位置，调用者须核对特定控制器的位编码。 */
+	return find_msb_set(size);    /* 返回以 1 起算的最高置位位置。 */
 }
 
+
 /**
- * @brief Look-up generic burst index to be used in registers
- *
- * WARNING: This look-up works for most controllers, but *may* not work for
- *          yours.  Ensure your controller expects the most common register
- *          bit values before using this convenience function.  If your
- *          controller does not support these values, you will have to write
- *          your own look-up inside the controller driver.
- *
- * @param burst: number of bytes to be sent in a single burst
- *
- * @retval common DMA index to be placed into registers.
- */
+  * @brief  按当前通用辅助函数将突发长度映射为索引。
+  * @param  burst：[输入]1～256 的突发长度。
+  * @retval 范围外或二的幂返回 0，范围内其他值返回最高置位的位置。
+  * @note   实际条件对二的幂走默认分支，使用者须核对目标控制器编码。
+  */
 static inline uint32_t dma_burst_index(uint32_t burst)
 {
-	/* Check boundaries (max supported burst length is 256) */
+	/* 拒绝超出 1～256 的突发长度。 */
 	if (burst < 1 || burst > 256) {
-		return 0; /* Zero is the default (1 burst length) */
+		return 0;              /* 范围外返回默认索引。 */
 	}
 
-	/* Ensure burst is a power of 2 */
+	/* 当前条件对二的幂返回默认索引；其他范围内的长度才进入位位置换算。 */
 	if (!(burst & (burst - 1))) {
-		return 0; /* Zero is the default (1 burst length) */
+		return 0;              /* 实际判定为二的幂，直接返回默认索引。 */
 	}
 
-	/* Convert to bit pattern for writing to a register */
-	return find_msb_set(burst);
+	/* 返回该数最高置位的位置。 */
+	return find_msb_set(burst);    /* 对其余输入返回最高置位位置。 */
 }
 
 /**
@@ -583,4 +554,4 @@ static inline uint32_t dma_burst_index(uint32_t burst)
 
 #include <syscalls/dma.h>
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_DMA_H_ */
+#endif    /* ZEPHYR_INCLUDE_DRIVERS_DMA_H_ */
