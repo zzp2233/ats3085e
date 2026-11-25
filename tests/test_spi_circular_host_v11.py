@@ -21,6 +21,10 @@ uint8_t http_expected_spec[3072];
 uint32_t file_ram_started, file_delivery_busy, file_delivery_queries;
 static bool file_delivery_mode;
 uint32_t file_pairs, file_source_size, file_source_offset;
+uint32_t file_shift, file_resyncs, file_resync_fail, file_reset_armed;
+uint32_t file_rx_fault, file_notice_pending, file_notice_corrupt;
+static uint32_t reset_tid;
+static uint16_t reset_request;
 static uint8_t file_source_byte(uint32_t offset) { return (uint8_t)(offset ^ (offset >> 8)); }
 static unsigned int file_pair_arm, file_half;
 static bool file_paired;
@@ -61,7 +65,7 @@ static void file_peer(const uint8_t *tx, uint8_t *slot) {
   memcpy(slot,file_reply,512);return;
  }
  memset(file_reply+SFILE_HEADER,0,SFILE_ACK_BYTES);
- if(cmd==SFILE_START || cmd==SFILE_START_RAM || cmd==SFILE_START_PAIR || cmd==SFILE_START_DELIVERY || cmd==SFILE_START_STREAM || cmd==SFILE_START_HTTPS || cmd==SFILE_START_HTTP) {
+ if(cmd==SFILE_START || cmd==SFILE_START_RAM || cmd==SFILE_START_PAIR || cmd==SFILE_START_DELIVERY || cmd==SFILE_START_STREAM || cmd==SFILE_START_HTTPS || cmd==SFILE_START_HTTP || cmd==SFILE_DEVICE_INFO) {
   file_https=cmd==SFILE_START_HTTPS;
   file_http=cmd==SFILE_START_HTTP;
   file_delivery_mode=cmd==SFILE_START_DELIVERY || cmd==SFILE_START_STREAM || file_https || file_http;
@@ -80,7 +84,14 @@ static void file_peer(const uint8_t *tx, uint8_t *slot) {
    } else if(swap_u16(tx+14)!=(cmd==SFILE_START_STREAM ? 12 : (cmd==SFILE_START_DELIVERY ? 8 : 4)))
     ++invariant_error;
   }
-  if((cmd==SFILE_START_PAIR || cmd==SFILE_START_DELIVERY || cmd==SFILE_START_STREAM || cmd==SFILE_START_HTTPS || cmd==SFILE_START_HTTP) && !file_paired)file_pair_arm=3;
+  if((cmd==SFILE_START_PAIR || cmd==SFILE_START_DELIVERY || cmd==SFILE_START_STREAM || cmd==SFILE_START_HTTPS || cmd==SFILE_START_HTTP || cmd==SFILE_DEVICE_INFO) && !file_paired)file_pair_arm=3;
+ }
+ if(cmd==SFILE_DEVICE_INFO) {
+  if(sfile_u32(tx+SFILE_HEADER)!=0)++invariant_error;
+  file_reply[SFILE_HEADER+SFILE_ACK_BYTES]=1;
+  sfile_put32(file_reply+SFILE_HEADER+SFILE_ACK_BYTES+1,1795449600u);
+  memcpy(file_reply+SFILE_HEADER+SFILE_ACK_BYTES+5,"123456789012345",15);
+  ack_len+=SFILE_DEVICE_INFO_BYTES;
  }
  if(cmd==SFILE_GROUP_END) {
   unsigned int count=sfile_group_count(file_blocks,file_first);
@@ -140,8 +151,36 @@ static int spi_acts_spi2_circular_transfer(const struct device *d,const uint8_t 
   if(file_paired && sfile_u32(tx+SFILE_PAIR_WITNESS_OFFSET)!=SFILE_PAIR_WITNESS)
    ++invariant_error;
   memcpy(rx,circular_reply[slot],512);
-  if(tx[2]!=SFILE_IDLE)
+  if(file_shift) {
+   unsigned int i;uint8_t a=rx[0],b=rx[1];
+   for(i=0;i<510;++i) {rx[i]=rx[i+2];} rx[510]=a;rx[511]=b;
+  }
+  if(tx[2]==SFILE_LINK_RESYNC) {
+   if(!file_paired || file_half || !sfile_valid(tx,SFILE_MASTER) ||
+      swap_u16(tx+14)!=4 || sfile_u32(tx+16)!=SFILE_RESYNC_COOKIE)++invariant_error;
+   reset_tid=sfile_u32(tx+4);reset_request=swap_u16(tx+12);file_reset_armed=1;
+  } else if(file_reset_armed && file_half) {
+   if(tx[2]!=SFILE_QUERY || reset_tid!=sfile_u32(tx+4) || reset_request!=swap_u16(tx+12))++invariant_error;
+   file_reset_armed=0;++file_resyncs;
+   file_notice_pending=0;
+   if(!file_resync_fail)file_shift=0;
+   memset(file_reply,0,512);file_reply[16]=SFILE_LINK_RESYNC;
+   sfile_put32(file_reply+31,SFILE_RESYNC_COOKIE);
+   sfile_frame(file_reply,SFILE_SLAVE,SFILE_ACK,reset_tid,0,reset_request,SFILE_ACK_BYTES+4);
+   if(file_resync_fail==2)sfile_frame(file_reply,SFILE_SLAVE,SFILE_ACK,reset_tid-1,0,reset_request,SFILE_ACK_BYTES+4);
+   if(file_resync_fail==3)file_reply[31]^=1;
+   memcpy(circular_reply[0],file_reply,512);memcpy(circular_reply[1],file_reply,512);
+  } else if(tx[2]!=SFILE_IDLE && !file_rx_fault && !file_notice_pending)
    file_peer(tx,file_paired&&!file_half ? file_pair_scratch : circular_reply[slot]);
+  if(file_paired && file_half && file_rx_fault) {
+   /* Independent peer: failed pair discarded, local reset emits a notice.
+    * No ordinary file request is processed until a valid reset pair. */
+   file_rx_fault=0;file_notice_pending=1;
+   memset(file_reply,0,512);sfile_put32(file_reply+16,0x52585032u);
+   sfile_frame(file_reply,SFILE_SLAVE,18,0,0,0,4);
+   if(file_notice_corrupt)file_reply[510]^=1;
+   memcpy(circular_reply[0],file_reply,512);memcpy(circular_reply[1],file_reply,512);
+  }
   if(file_paired) {
    file_half^=1u;
    token=!file_half;
@@ -184,7 +223,7 @@ uint32_t file_ready_timeout_ms, network_hold_ms, network_wait_budget, network_ho
 static int swap_ready_wait_timeout(uint32_t *waited,uint32_t timeout_ms) {
  file_ready_timeout_ms=timeout_ms;
  int ret=swap_ready_wait(waited);
- if(!ret && file_https && file_delivery_busy && network_hold_ms && !network_hold_used) {
+ if(!ret && (file_https || file_http) && file_delivery_busy && network_hold_ms && !network_hold_used) {
   network_hold_used=1;network_wait_budget=timeout_ms;
   uint32_t delay=network_hold_ms<timeout_ms?network_hold_ms:timeout_ms;
   *waited=delay*1000u;now_us+=*waited;
@@ -229,12 +268,17 @@ static void k_heap_free(struct k_heap *h,void *p) {
 #define TRNG_CTRL 4
 #define TRNG_LR 5
 #define TRNG_MR 6
+#define CMU_SPI2CLK 7u
+#define SPI2_REG_BASE 0x100u
+#define GPIO_REG_BASE 0x2000u
 uint32_t rng_clock, rng_control, rng_samples, rng_resets, rng_tick_start;
 uint32_t rng_timeout_at, rng_stuck, rng_lock_fail, rng_locked, irq_locked;
 uint32_t rng_clock_writes, rng_low_reads, rng_high_reads;
 static unsigned int irq_lock(void) {++irq_locked;return 0;}
 static void irq_unlock(unsigned int key) {(void)key;--irq_locked;}
 static uint32_t sys_read32(uint32_t reg) {
+ if(reg==CMU_SPI2CLK || reg==SPI2_REG_BASE || reg==SPI2_REG_BASE+4 ||
+    (reg>=GPIO_REG_BASE+57*4 && reg<=GPIO_REG_BASE+60*4))return reg;
  if(!irq_locked || !rng_locked)++invariant_error;
  if(reg==CMU_DEVCLKEN0)return rng_clock;
  if(reg==TRNG_CTRL) {
@@ -281,6 +325,33 @@ int probe_file(void) {
  char *a[]={"spi2filetest",arg_count,"test.bin",arg_gap};
  file_mode=1;
  return shell_spi2filetest(&shell,arg_gap[0]?4:3,a);
+}
+uint8_t probe_device_info[SFILE_DEVICE_INFO_BYTES];
+int probe_info(void) {
+ struct sfile_sender x={.device_info=probe_device_info,.delivery_command=SFILE_DEVICE_INFO,.bad_block=UINT32_MAX};
+ file_mode=1;return sfile_run(&shell,x,NULL,true,SFILE_HTTPS_HZ);
+}
+uint32_t callback_used, callback_fail, callback_complete;
+#ifdef P4_SPI_DIAG
+struct sfile_diag response_diag;
+#endif
+static int response_callback(void *unused,uint32_t offset,const uint8_t *data,unsigned int len) {
+ unsigned int i;(void)unused;
+ if(callback_fail && offset>=400)return -27;
+ if(offset!=callback_used)++invariant_error;
+ for(i=0;i<len;++i)if(data[i]!=(uint8_t)(offset+i))++invariant_error;
+ callback_used+=len;return 0;
+}
+int probe_response(void) {
+ uint8_t spec[540];unsigned int i;int ret;
+ struct sfile_http_files http={.spec_data=spec,.spec_size=540,.receive=response_callback};
+ struct sfile_sender x={.http=&http,.size=1,.bad_block=UINT32_MAX,.delivery_command=SFILE_START_HTTP,.read_block=sfile_read_generated};
+#ifdef P4_SPI_DIAG
+ http.diag=&response_diag;
+#endif
+ for(i=0;i<sizeof(spec);++i)spec[i]=(uint8_t)i;
+ file_mode=1;ret=sfile_run(&shell,x,NULL,true,SFILE_HTTPS_HZ);
+ callback_complete=http.response_complete;return ret;
 }
 int probe_ram(void) {
  char *a[]={"spi2ram",arg_count,arg_gap};
@@ -334,6 +405,93 @@ class Model(old.Model):
 
 class HostTests(unittest.TestCase):
     def setUp(self):self.m=Model()
+
+    def test_slave_rx_fault_notice_fails_current_request_then_same_link_works(self):
+        m=self.m
+        self.assertEqual(m.call('probe_info'),0)
+        before=m.get('transfers');aborts=m.get('file_aborts')
+        m.set('file_rx_fault',1)
+        self.assertNotEqual(m.call('probe_info'),0)
+        self.assertEqual(m.get('file_resyncs'),1)
+        self.assertEqual(m.get('file_notice_pending'),0)
+        self.assertEqual(m.get('file_aborts'),aborts)
+        self.assertEqual(m.get('transfers')-before,8)
+        self.assertEqual(m.call('probe_info'),0)
+        self.assertEqual(m.get('invariant_error'),0)
+
+    def test_corrupt_notice_cannot_bypass_crc_and_bad_confirmation_locks_link(self):
+        m=self.m
+        self.assertEqual(m.call('probe_info'),0)
+        before=m.get('transfers')
+        m.set('file_rx_fault',1);m.set('file_notice_corrupt',1);m.set('file_resync_fail',3)
+        self.assertNotEqual(m.call('probe_info'),0)
+        # Four invalid notices, not the two-frame valid notice shortcut.
+        self.assertEqual(m.get('transfers')-before,10)
+        self.assertEqual(m.get('file_resyncs'),1)
+        count=m.get('transfers')
+        self.assertNotEqual(m.call('probe_info'),0)
+        self.assertEqual(m.get('transfers'),count)
+        self.assertEqual(m.get('invariant_error'),0)
+
+    def test_persistent_two_byte_shift_fails_operation_recovers_then_retries(self):
+        m=self.m
+        self.assertEqual(m.call('probe_info'),0)
+        before=m.get('transfers');m.set('file_shift',1)
+        self.assertNotEqual(m.call('probe_info'),0)
+        self.assertEqual(m.get('file_resyncs'),1)
+        self.assertLess(m.get('transfers')-before,20)
+        self.assertEqual(m.get('file_shift'),0)
+        self.assertEqual(m.call('probe_info'),0)
+        self.assertEqual(m.get('invariant_error'),0)
+
+    def test_bad_or_stale_reset_ack_quarantines_and_never_retries_upload(self):
+        for fail in (1,2,3):
+            m=Model();self.assertEqual(m.call('probe_info'),0)
+            m.set('file_shift',1);m.set('file_resync_fail',fail)
+            self.assertNotEqual(m.call('probe_info'),0)
+            self.assertEqual(m.get('file_resyncs'),1)
+            count=m.get('transfers')
+            self.assertNotEqual(m.call('probe_info'),0)
+            self.assertEqual(m.get('transfers'),count)
+            self.assertEqual(m.get('invariant_error'),0)
+
+    def test_device_info_first_pair_repeated_then_http(self):
+        m=self.m
+        for _ in range(3):
+            self.assertEqual(m.call('probe_info'),0)
+            info=bytes(m.uc.mem_read(m.sym['probe_device_info'],20))
+            self.assertEqual(info,b'\x01'+(1795449600).to_bytes(4,'little')+b'123456789012345')
+        self.assertEqual(m.get('file_aborts'),3)
+        self.assertEqual(m.get('file_finished'),0)
+        self.assertEqual(m.get('invariant_error'),0)
+        m.set('file_source_size',480)
+        # The existing HTTP probe sends one byte from source offset zero.
+        m.set('file_expected_crc',zlib.crc32(b'\0'))
+        self.assertEqual(m.call('probe_http'),0)
+        self.assertEqual(m.get('invariant_error'),0)
+
+    def test_http_callback_pagination_and_failure(self):
+        for fail in (0,1):
+            m=Model();m.set('file_expected_crc',zlib.crc32(b'\0'))
+            m.set('callback_fail',fail)
+            self.assertEqual(m.call('probe_response'),-27 if fail else 0)
+            self.assertEqual(m.get('callback_used'),400 if fail else 805)
+            self.assertEqual(m.get('callback_complete'),0 if fail else 1)
+            self.assertEqual(m.get('invariant_error'),0)
+            self.assertEqual(m.get('locks'),0)
+
+    def test_diagnostic_retains_first_pair_after_quiet(self):
+        m=Model()
+        if 'response_diag' not in m.sym:self.skipTest('requires --p4-diag')
+        m.set('file_expected_crc',zlib.crc32(b'\0'));m.set('network_hold_ms',2500)
+        self.assertEqual(m.call('probe_response'),0)
+        # Two 17-word samples, initial 7 registers, wait and count.
+        import struct
+        values=struct.unpack('<43I',bytes(m.uc.mem_read(m.sym['response_diag'],172)))
+        self.assertEqual(values[41:43],(2500000,2))
+        self.assertEqual(values[0],7);self.assertEqual(values[17],7)
+        self.assertEqual(values[15],1024);self.assertEqual(values[32],1024)
+        self.assertEqual(m.get('invariant_error'),0)
 
     def test_https_clock_uses_real_soc_divider(self):
         # Execute the production clock selector as well as the mocked SPI peer.
@@ -706,7 +864,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(m.call(),-110);self.assertEqual(m.get('opens'),1)
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--build-dir',type=Path,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--build-dir',type=Path,required=True);p.add_argument('--p4-diag',action='store_true');a=p.parse_args()
     out=a.build_dir.resolve();out.mkdir(parents=True,exist_ok=True)
     (out/'fs').mkdir(exist_ok=True)
     (out/'drivers/se').mkdir(parents=True,exist_ok=True)
@@ -819,6 +977,7 @@ int probe_1mhz_clock(void) {return acts_clk_set_rate_spi2(1000000u);}
         logged_target=va_arg(a,unsigned int);logged_attempts=va_arg(a,unsigned int);
     } else if(prefix(fmt,"SPI10 RESULT"))'''
     h=h.replace(find,repl)
+    if a.p4_diag:h='#define P4_SPI_DIAG 1\n'+h
     source=out/'circular_command.c';source.write_text(h,encoding='utf-8');old.ELF=out/'circular_command.elf'
     compiler=Path('D:/UMA503/UMA503-V7_OPENCPU_OC_2025.03.14_1644/startup/app_release/app_tools/cross_tools/gcc-arm-none-eabi/bin/arm-none-eabi-gcc.exe')
     subprocess.run([str(compiler),'-mcpu=cortex-m4','-mthumb','-O0','-Wall','-Wextra','-Werror',

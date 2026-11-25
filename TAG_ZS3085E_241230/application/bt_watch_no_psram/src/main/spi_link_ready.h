@@ -20,6 +20,7 @@ static const struct device *s_ready_gpio;
 static uint32_t s_ready_saved_ctl;
 static uint8_t s_ready_expected = 1u;
 static bool s_ready_used, s_ready_legacy_used, s_ready_faulted, s_ready_configured;
+static bool s_ready_cleanup_failed;
 static struct gpio_callback s_ready_callback;
 static struct k_sem s_ready_sem;
 static bool s_ready_callback_added;
@@ -57,14 +58,14 @@ static int swap_ready_restore(void)
     }
     if (s_ready_configured) sys_write32(s_ready_saved_ctl, GPION_CTL(SWAP_READY_PIN));
     s_ready_configured = false;
-    if (ret) s_ready_faulted = true;
+    if (ret) s_ready_faulted = s_ready_cleanup_failed = true;
     return ret;
 }
 
-static int swap_ready_begin(void)
+static int swap_ready_begin_internal(bool boot_probe)
 {
     int ret;
-    if (s_ready_faulted || s_ready_legacy_used) return -EPERM;
+    if ((!boot_probe && s_ready_faulted) || s_ready_legacy_used || s_ready_cleanup_failed) return -EPERM;
     s_ready_gpio = device_get_binding(CONFIG_GPIO_B_NAME);
     if (!s_ready_gpio) return -ENODEV;
     s_ready_saved_ctl = sys_read32(GPION_CTL(SWAP_READY_PIN));
@@ -98,6 +99,40 @@ static int swap_ready_begin(void)
     s_ready_used = true;
     return 0;
 }
+
+static int swap_ready_begin(void)
+{
+    return swap_ready_begin_internal(false);
+}
+
+#ifdef SPI_LINK_BOOT_SYNC
+/* No clocks during observation. A live, quiescent session can publish at most
+ * one final token; only a fresh boot emits repeated 40 ms half-periods. This
+ * is a permission to try the CRC-checked boot handshake, not proof of a peer.
+ * Never clear fault state or change token parity merely for a held level. */
+static int swap_ready_boot_probe(void)
+{
+    uint32_t start = k_uptime_get_32(), edge = start;
+    unsigned int edges = 0;
+    int previous = gpio_pin_get_raw(s_ready_gpio, SWAP_READY_PIN % 32u);
+    if (previous < 0) return previous;
+    while ((uint32_t)(k_uptime_get_32() - start) < 320u) {
+        uint32_t now;
+        int level;
+        k_msleep(1);
+        now = k_uptime_get_32();
+        level = gpio_pin_get_raw(s_ready_gpio, SWAP_READY_PIN % 32u);
+        if (level < 0) return level;
+        if (level != previous) {
+            uint32_t width = now - edge;
+            if (edges && (width < 25u || width > 65u)) return -EIO;
+            ++edges; edge = now; previous = level;
+            if (edges >= 4u && level == 1) return 1;
+        }
+    }
+    return edges > 1u ? -EIO : 0;
+}
+#endif
 
 /* Also used after the last transfer: observe the pending token without
  * consuming it, so PASS includes the slave's final successful rearm. */
