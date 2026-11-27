@@ -116,7 +116,7 @@ static volatile uint32_t s_spi2_diag_budget = 40;    /* 驱动从机诊断最多
 #define SPI_STATUS_RX_FULL		(1 << 7)     /* 接收 FIFO 满的状态位。 */
 #define SPI_STATUS_RX_EMPTY		(1 << 6)     /* 接收 FIFO 空的状态位。 */
 #define SPI_STATUS_TX_FULL		(1 << 5)     /* 发送 FIFO 满的状态位。 */
-#define SPI_STATUS_TX_EMPTY		(1 << 4)     /* 发送 FIFO 空的状态位。 */
+#define SPI_STATUS_TX_EMPTY		(1 << 4)     /* 发送 FIFO 已空；确认最后一位离开移位器还要结合 BUSY 判断。 */
 #define SPI_STATUS_TX_IRQ_PD		(1 << 3)     /* 发送中断挂起的状态位。 */
 #define SPI_STATUS_RX_IRQ_PD		(1 << 2)     /* 接收中断挂起的状态位。 */
 #define SPI_STATUS_BUSY			(1 << 0)     /* 硬件忙状态，完成判断需区分主从模式的状态位。 */
@@ -134,8 +134,8 @@ struct acts_spi_controller
 {
     volatile uint32_t ctrl;      /* 偏移 0x00，控制寄存器，配置角色、模式和 FIFO。 */
     volatile uint32_t status;    /* 偏移 0x04，状态寄存器，含 FIFO 空满及错误标志。 */
-    volatile uint32_t txdat;     /* 偏移 0x08，写入数据送入发送 FIFO。 */
-    volatile uint32_t rxdat;     /* 偏移 0x0C，读取时取走接收 FIFO 数据。 */
+    volatile uint32_t txdat;     /* 偏移 0x08，CPU 或 TX DMA 写此端口，把字节送进发送 FIFO；随后移位器才按 SCK 将它送到 MOSI。 */
+    volatile uint32_t rxdat;     /* 偏移 0x0C，CPU 或 RX DMA 读此端口取走已收字节。主机循环接收时 PDMA 将它们写入 spi2_dma_rx。 */
     volatile uint32_t bc;        /* 偏移 0x10，字节计数；完成判据需区分主从语义。 */
 } ;
 

@@ -1,4 +1,4 @@
-# Kconfig - ACTIONS primitive options for sdk version 2.0
+# 本文件是 BT Watch 应用的 Kconfig 入口。它引入 Zephyr 的配置树，定义应用线程和资源卷的缺省值，并载入 src/Kconfig。
 
 #
 # Copyright (c) 2015 Intel Corporation
@@ -18,10 +18,12 @@
 
 mainmenu "BT Watch App"
 
+# 先载入通用配置，包括 Shell 和文件系统等子系统的选项。
 source "Kconfig.zephyr"
 
 menu "App Configuration"
 
+# 应用线程优先级的默认值为 10；配置可由应用或板级输入覆盖。
 config APP_PRIORITY
     int
     prompt "App Thread Priority"
@@ -29,6 +31,7 @@ config APP_PRIORITY
     help
     This option set app thread priority
 
+# 应用线程栈容量，单位为字节。这里默认 2048，应用的 prj.conf 请求 1536。
 config APP_STACKSIZE
     int
     prompt "App Thread Stack Size"
@@ -36,36 +39,42 @@ config APP_STACKSIZE
     help
     This option set stack size for app thread
 
+# 第二个 UI 资源卷名，默认 /SD:B。
 config APP_UI_DISK_B
 	string "drive name for ui resource"
 	default "/SD:B"
 	help
 	  This option set driver name for ui resource
 
+# UI 主资源卷名，默认 /SD:A。
 config APP_UI_DISK
 	string "drive name for ui resource"
 	default "/SD:A"
 	help
 	  This option set driver name for ui resource
 
+# 字体资源卷名，默认 /SD:C。
 config APP_FONT_DISK
 	string "drive name for ui resource"
 	default "/SD:C"
 	help
 	  This option set driver name for ui resource
 
+# 应用访问 FatFs 时使用的卷名。
 config APP_FAT_DISK
 	string "drive name for fatfs"
 	default "/SD:"
 	help
 	  This option set drive name for fatfs
 
+# 欢迎界面所用的资源卷，与主界面分开配置。
 config WELCOME_UI_DISK
 	string "drive name for welcome ui resource"
 	default "/SD:A"
 	help
 	  This option set driver name for welcome ui resource
 
+# 从本 Kconfig 所在目录载入业务选项，BT_MAIN_APP 的定义在这里引用的文件中。
 rsource "src/Kconfig"
 
 endmenu

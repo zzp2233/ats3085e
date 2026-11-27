@@ -6,6 +6,7 @@
  * V5 保持 v3 线上布局、256 字节帧和原 CRC 定义；提速不改变协议。
  * 旧 PIO 预装限制只适用于 PIO；503 DMA 不使用 SWAP_PRELOAD。
  * 单帧压测的从机在下一次事务回报上一有效请求的会话及序号；启动空闲帧为 sid=0、seq=65535。 */
+/* 文件协议也复用本头的 swap_u16 和 swap_crc 读取小端字段、校验帧头与有效载荷；下面的 v3 测试图案有自己的布局。 */
 #ifndef SPI_LINK_SWAP_H_
 #define SPI_LINK_SWAP_H_
 #include <stdint.h>          /* 使用固定宽度整数，线协议不依赖两端 int 大小。 */

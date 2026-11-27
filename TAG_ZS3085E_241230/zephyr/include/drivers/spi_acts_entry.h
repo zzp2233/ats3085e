@@ -44,7 +44,7 @@ int spi_acts_spi2_circular_open(const struct device *dev, const struct spi_confi
   * @param  tx：[输入]非空且可读的 512 字节，函数先复制到内部 SRAM。
   * @param  rx：[输出]非空且可写的 512 字节，仅在整块校验通过后交付。
   * @retval 0 表示交付 512 字节，-EPERM 为会话无效，-EINVAL 为空缓冲，-EIO 为硬件状态、事件或计数不符，-ETIMEDOUT 为超过 100 ms，其他负值来自 DMA。无平台支持时返回 -ENOTSUP。
-  * @note   调用者先消费对端的一次 READY。每次只启动有限 TX，RX 保持重载；进入硬件故障分支后必须 close。
+  * @note   调用者按当前单块或配对规则取得 READY。函数同步等待有限 TX、持续重载的 RX 和 SPI 线路均达到本槽的结束条件，将 512 字节复制到 rx 后才返回成功。硬件故障后须 close。
   */
 int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx, uint8_t *rx);
 /**

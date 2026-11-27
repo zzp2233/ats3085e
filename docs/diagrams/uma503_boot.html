@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; width: 1600px; height: 940px; background: #fff; }
+  body { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color: #1b2a3a; }
+  .canvas { position: relative; width: 1600px; height: 940px; }
+  .title { position: absolute; left: 40px; top: 24px; font-size: 33px; font-weight: 700; }
+  .title .bar { display: inline-block; width: 10px; height: 33px; background: #2e7d32; vertical-align: -4px; margin-right: 14px; }
+  .sub { position: absolute; left: 64px; top: 70px; font-size: 17px; color: #5b6b7c; }
+  .stage { position: absolute; height: 96px; border-radius: 8px; color: #fff; padding: 12px 14px; box-sizing: border-box; }
+  .stage .h { font-size: 16px; font-weight: 700; line-height: 1.25; }
+  .stage .d { font-size: 12px; opacity: .92; margin-top: 6px; line-height: 1.4; }
+  .arrow { position: absolute; height: 26px; }
+  .band { position: absolute; border-radius: 8px; padding: 12px 16px; box-sizing: border-box; }
+  .band .h { font-size: 16px; font-weight: 700; }
+  .band .d { font-size: 12.5px; color: #4a5a6a; margin-top: 6px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <div class="title"><span class="bar"></span>UMA503 启动链与任务：从 BootROM 到两个常驻任务</div>
+  <div class="sub">app_main_entry() 只做两件事：拉起 SPI 任务、拉起 OneNET 任务 · 所有初始化都发生在任务里</div>
+
+  <!-- 阶段条 -->
+  <div class="stage" style="left:40px;top:170px;width:250px;background:#455a64">
+    <div class="h">① BootROM</div>
+    <div class="d">片内固化代码。只认 Flash 起始处，按芯片自身流程往下跳。</div>
+  </div>
+  <div class="stage" style="left:310px;top:170px;width:250px;background:#546e7a">
+    <div class="h">② boot33</div>
+    <div class="d">读 loadtable 分区表，决定每个镜像搬到哪、以 XIP 还是 PSRAM 运行。</div>
+  </div>
+  <div class="stage" style="left:580px;top:170px;width:250px;background:#6a1b9a">
+    <div class="h">③ 装 CP / DSP / RF</div>
+    <div class="d">模组自己的协议栈、音频与射频镜像，先于你的应用就位。</div>
+  </div>
+  <div class="stage" style="left:850px;top:170px;width:250px;background:#1565c0">
+    <div class="h">④ 装 app.bin</div>
+    <div class="d">你的镜像落到 0x8037A000，512 KB 窗口内，由 um_app_header 描述入口。</div>
+  </div>
+  <div class="stage" style="left:1120px;top:170px;width:250px;background:#1f5f9e">
+    <div class="h">⑤ app_main_entry</div>
+    <div class="d">厂商库在可用线程上下文里回调。这里只创建任务，不做大循环。</div>
+  </div>
+  <div class="stage" style="left:1390px;top:170px;width:170px;background:#00897b">
+    <div class="h">⑥ OSA 调度</div>
+    <div class="d">Nucleus 接管 CPU，tick = 5 ms。</div>
+  </div>
+
+  <!-- 箭头 -->
+  <div class="arrow" style="left:290px;top:200px;width:20px;height:12px;background:#90a4ae"></div>
+  <div class="arrow" style="left:560px;top:200px;width:20px;height:12px;background:#90a4ae"></div>
+  <div class="arrow" style="left:830px;top:200px;width:20px;height:12px;background:#90a4ae"></div>
+  <div class="arrow" style="left:1100px;top:200px;width:20px;height:12px;background:#90a4ae"></div>
+  <div class="arrow" style="left:1370px;top:200px;width:20px;height:12px;background:#90a4ae"></div>
+
+  <!-- 任务分叉 -->
+  <div class="band" style="left:180px;top:340px;width:600px;background:#edf7ed;border:1px solid #bfdcc0;border-left:6px solid #2e7d32">
+    <div class="h">任务 A · spi_link（优先级 80，4 KB 静态栈）</div>
+    <div class="d">
+      独占 SSP2，做从机双槽 DMA 收发。<br>
+      每块 512 B 帧 / 480 B 正文，READY 决定主机可发几块。<br>
+      组齐后把缓冲交给交付 worker，交给 HTTPS 或落盘。
+    </div>
+  </div>
+
+  <div class="band" style="left:820px;top:340px;width:600px;background:#eef3fb;border:1px solid #c3d5ec;border-left:6px solid #1565c0">
+    <div class="h">任务 B · onenet_boot（优先级 90，10 KB 堆栈）</div>
+    <div class="d">
+      等网络注册（CEREG）与有效 UTC，再建 MQTT 会话。<br>
+      上报 record_state，处理 bind_status 类下行属性。<br>
+      断线重连与应答超时都由这个任务自己管。
+    </div>
+  </div>
+
+  <!-- 分叉线 -->
+  <div style="position:absolute;left:480px;top:296px;width:3px;height:44px;background:#2e7d32"></div>
+  <div style="position:absolute;left:1120px;top:296px;width:3px;height:44px;background:#1565c0"></div>
+  <div style="position:absolute;left:480px;top:296px;width:642px;height:3px;background:#bfd8f0"></div>
+
+  <!-- 三层通道说明 -->
+  <div class="band" style="left:40px;top:520px;width:1520px;height:150px;background:#fbfcfe;border:1px solid #d6e2ef">
+    <div class="h">503 和模组打交道的三条通道（这是 OpenCPU 最特殊的地方）</div>
+    <div class="d" style="margin-top:10px;font-size:13px;line-height:1.9">
+      ① <b>你的代码调 SDK</b>：um_http / um_mqtt / um_nw / um_spi，链接期定地址，就是普通 C 调用。<br>
+      ② <b>模组反向调你</b>：cust_src/um_api_map 的 v_user_api_table 放进 DDR_USER_API_TABLE 段，字段是 {函数名哈希, 函数指针}，运行期按哈希查表。<br>
+      ③ <b>AT 命令直接进你的函数</b>：cust_src/um_atsever/um_atsrv.c 用 utlAtParameter_T 注册参数、ATRESP() 回包，这是 503 排障的主入口。
+    </div>
+  </div>
+
+  <!-- 与 3085 分工 -->
+  <div class="band" style="left:40px;top:700px;width:660px;background:#f4f8ff;border:1px solid #c3d5ec;border-top:5px solid #1f4e79">
+    <div class="h">ATS3085E · 有手有脚的业务端</div>
+    <div class="d">Zephyr 内核，编译期注册表决定初始化顺序。<br>录音、屏幕、UI、本地文件、源数据可回读。<br>对外只看到一组 SPI 帧和 READY 信号。</div>
+  </div>
+
+  <div class="band" style="left:760px;top:700px;width:660px;background:#fdf6ee;border:1px solid #e6cba8;border-top:5px solid #b26a00">
+    <div class="h">UMA503 · 有嘴有耳朵的通信端</div>
+    <div class="d">Nucleus + OSA，app_main_entry 手工起任务。<br>注网、TLS、HTTP、MQTT、断网重连、下行属性。<br>不碰录音和 UI，只把字节交给云端。</div>
+  </div>
+
+  <div style="position:absolute;left:696px;top:700px;width:68px;height:70px;background:#fff;border:1px dashed #8fa3b8;border-radius:6px;font-size:11px;color:#4a5a6a;text-align:center;padding-top:14px;box-sizing:border-box;line-height:1.5">
+    SPI<br>512 B 帧
+  </div>
+
+  <div style="position:absolute;left:40px;top:880px;font-size:13px;color:#8695a4">
+    与 3085 的差别：那边是“驱动报名 + 链接器排队”，这边是“两行调用 + 任务自己初始化”。
+  </div>
+</div>
+</body>
+</html>

@@ -73,8 +73,8 @@ struct acts_dma_chan_reg {
 	volatile uint32_t saddr1;    /* 分离模式的附加源地址。 */
 	volatile uint32_t daddr0;    /* 主目的地址。 */
 	volatile uint32_t daddr1;    /* 分离模式的附加目的地址。 */
-	volatile uint32_t bc;        /* 编程的块字节计数。 */
-	volatile uint32_t rc;        /* 硬件实时剩余计数，位于通道偏移 0x1c。 */
+	volatile uint32_t bc;        /* 本通道编程的块字节数，对应转储中的 DMA_LEN。SPI2 循环接收一次为整环配置 1024。 */
+	volatile uint32_t rc;        /* 本通道实时剩余字节数，对应 DMA_RMAIN_LEN，通道内偏移 0x1c。RX 重载可回到整环长度，TX 的独立计数则应归零。 */
 };
 struct acts_dma_reg {
 	volatile uint32_t dma_ip;    /* 全局半传输与完成待决位。 */
@@ -284,7 +284,7 @@ static int dma_acts_config(const struct device *dev, uint32_t channel,
 	}
 
 	if (head_block->source_reload_en || head_block->dest_reload_en) {
-		ctl |= DMA_CTL_RELOAD;                                        /* 在控制字中设置硬件重载。 */
+		ctl |= DMA_CTL_RELOAD;                                        /* 将请求转换成通道控制字的重载位。SPI2 的两个 RX 半区共用这个硬件块，无须为 A、B 各链接一张描述符。 */
 		chan->hcom_callback_en = 1;                                   /* 允许 start 在注册回调的前提下开放半程 IRQ。 */
 	}
 

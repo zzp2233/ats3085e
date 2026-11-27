@@ -68,7 +68,7 @@ struct dma_block_config {
 	uint16_t  source_addr_adj :   2;        /* 源地址每元素步进方式。 */
 	uint16_t  dest_addr_adj :     2;        /* 目的地址每元素步进方式。 */
 	uint16_t  source_reload_en :  1;        /* 块结束时重载源地址。 */
-	uint16_t  dest_reload_en :    1;        /* 块结束时重载目的地址，SPI2 用此字段保持持续接收。 */
+	uint16_t  dest_reload_en :    1;        /* 块结束时请求重载目的端。SPI2 的 RX 以一个 1024 字节块配置；具体重载由 PDMA 驱动映射为控制位。 */
 	uint16_t  fifo_mode_control : 4;        /* 启动传输所需的 FIFO 填充程度，编码取决于硬件。 */
 	uint16_t  flow_control_mode : 1;        /* 选择源端就绪或等待目的端请求的流控方式。 */
 	uint16_t  reserved :          3;        /* 保留位，初始化清零。 */

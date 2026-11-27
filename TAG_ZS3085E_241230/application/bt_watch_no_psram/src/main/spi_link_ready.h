@@ -15,7 +15,7 @@ static uint8_t s_ready_expected = 1u;                                           
 static bool s_ready_used, s_ready_legacy_used, s_ready_faulted, s_ready_configured;    /* 分别记录 READY 使用史、旧路径使用史、锁存故障和本次已配置状态。 */
 static bool s_ready_cleanup_failed;                                                    /* 清理失败单独保留，不能靠发现新启动信标解除。 */
 static struct gpio_callback s_ready_callback;                                          /* 持久回调对象，登记期间须保持地址有效。 */
-static struct k_sem s_ready_sem;                                                       /* 最大计数为一的信号量，通知边沿而非累计发送许可。 */
+static struct k_sem s_ready_sem;                                                       /* GPIO 边沿可唤醒等待任务，计数最多为一；醒来还要对照 s_ready_expected 复核电平，再按当前单块或配对模式使用授权。 */
 static bool s_ready_callback_added;                                                    /* 记录回调是否已挂入驱动，供错误分支回收。 */
 static volatile uint32_t s_ready_irq_count;                                            /* 中断递增的序号，线程用它识别合并或竞争的边沿。 */
 static uint32_t s_ready_block_count;                                                   /* 本次命令等待线程实际调用阻塞操作的次数。 */

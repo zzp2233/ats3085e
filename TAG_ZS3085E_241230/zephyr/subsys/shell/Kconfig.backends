@@ -1,8 +1,9 @@
-# Shell backends configuration options
+# 本文件配置 Zephyr Shell 的传输后端，包括命令行使用的 UART、接收方式、环形缓冲容量和各后端的日志初始等级。
 
 # Copyright (c) 2018 Nordic Semiconductor ASA
 # SPDX-License-Identifier: Apache-2.0
 
+# 打开各类终端传输后端的配置入口。
 menuconfig SHELL_BACKENDS
     bool "Enable shell backends"
     default y
@@ -11,9 +12,10 @@ menuconfig SHELL_BACKENDS
 
 if SHELL_BACKENDS
 
-# Workaround for not being able to have commas in macro arguments
+# 先把带逗号的设备树 chosen 名存为变量，让后面的宏取得一个完整参数。
 DT_CHOSEN_Z_SHELL_UART := zephyr,shell-uart
 
+# 串口后端接入 UART 和环形缓冲，实际选用的设备名取自下一项。
 config SHELL_BACKEND_SERIAL
     bool "Enable serial backend"
     default "$(dt_chosen_enabled,$(DT_CHOSEN_Z_SHELL_UART))" if HAS_DTS
@@ -23,6 +25,7 @@ config SHELL_BACKEND_SERIAL
     help
       Enable serial backend.
 
+# 后端用该名称查找设备；本次构建选用 UART_0。
 config UART_SHELL_ON_DEV_NAME
     string "Device Name of UART Device for SHELL_BACKEND_SERIAL"
     default "$(dt_chosen_label,$(DT_CHOSEN_Z_SHELL_UART))" if HAS_DTS
@@ -36,6 +39,7 @@ config UART_SHELL_ON_DEV_NAME
 
 if SHELL_BACKEND_SERIAL
 
+# 在 UART 驱动就绪之后初始化 Shell 传输后端。
 config SHELL_BACKEND_SERIAL_INIT_PRIORITY
     int "Initialization priority"
     default 0
@@ -44,22 +48,24 @@ config SHELL_BACKEND_SERIAL_INIT_PRIORITY
       Initialization priority for UART backend. This must be bigger than
       the initialization priority of the used serial device.
 
+# 设置串口交互终端的提示符。
 config SHELL_PROMPT_UART
     string "Displayed prompt name"
     default "uart:~$ "
     help
       Displayed prompt name for UART backend.
 
-# Workaround for not being able to have commas in macro arguments
+# 先把带逗号的设备树 chosen 名存为变量，让后面的宏取得一个完整参数。
 DT_CHOSEN_Z_SHELL_UART := zephyr,shell-uart
 
-# Internal config to enable UART interrupts if supported.
+# 具备串口中断支持时选择 IRQ 驱动后端；该分支使用 FIFO 和环形缓冲，轮询分支使用定时器。
 config SHELL_BACKEND_SERIAL_INTERRUPT_DRIVEN
     bool "Interrupt driven"
     default y
     depends on SERIAL_SUPPORT_INTERRUPT
     select UART_INTERRUPT_DRIVEN
 
+# 中断发送队列的字节容量，队列中的字节等待 UART 取走。
 config SHELL_BACKEND_SERIAL_TX_RING_BUFFER_SIZE
     int "Set TX ring buffer size"
     default 8
@@ -68,6 +74,7 @@ config SHELL_BACKEND_SERIAL_TX_RING_BUFFER_SIZE
       If UART is utilizing DMA transfers then increasing ring buffer size
       increases transfers length and reduces number of interrupts.
 
+# 串口输入队列的字节容量。当前板型选 64 字节；Shell 线程从队列取数据，IRQ 通知只传递就绪事件。
 config SHELL_BACKEND_SERIAL_RX_RING_BUFFER_SIZE
     int "Set RX ring buffer size"
     default 64
@@ -78,6 +85,7 @@ config SHELL_BACKEND_SERIAL_RX_RING_BUFFER_SIZE
       escape sequences). However, if bulk data is transferred it may be
       required to increase it.
 
+# 未启用中断后端时，定时器按此毫秒周期轮询串口。
 config SHELL_BACKEND_SERIAL_RX_POLL_PERIOD
     int "RX polling period (in milliseconds)"
     default 10
@@ -85,6 +93,7 @@ config SHELL_BACKEND_SERIAL_RX_POLL_PERIOD
     help
       Determines how often UART is polled for RX byte.
 
+# 支持线路控制时可在发送前检查 DTR 信号。
 config SHELL_BACKEND_SERIAL_CHECK_DTR
     bool "Check DTR signal before TX"
     default y if USB_UART_CONSOLE
@@ -92,6 +101,7 @@ config SHELL_BACKEND_SERIAL_CHECK_DTR
     help
       Check DTR signal before TX.
 
+# 后续模板以此模块名展开日志队列容量与允许等待时间的设置。
 module = SHELL_BACKEND_SERIAL
 default-timeout = 100
 source "subsys/shell/Kconfig.template.shell_log_queue_timeout"
@@ -99,6 +109,7 @@ source "subsys/shell/Kconfig.template.shell_log_queue_timeout"
 default-size = 10
 source "subsys/shell/Kconfig.template.shell_log_queue_size"
 
+# 选择启动时允许送入此终端的最高日志等级，由下面的整数选项映射为代码使用的数值。
 choice
     prompt "Initial log level limit"
     default SHELL_BACKEND_SERIAL_LOG_LEVEL_DEFAULT
@@ -134,6 +145,7 @@ config SHELL_BACKEND_SERIAL_LOG_LEVEL
 
 endif # SHELL_BACKEND_SERIAL
 
+# 可选的 SEGGER RTT 终端，收发缓冲与 UART 后端独立。
 config SHELL_BACKEND_RTT
     bool "Enable RTT backend"
     select CONSOLE
@@ -144,18 +156,21 @@ config SHELL_BACKEND_RTT
 
 if SHELL_BACKEND_RTT
 
+# RTT 终端显示的命令提示符。
 config SHELL_PROMPT_RTT
     string "Displayed prompt name"
     default "rtt:~$ "
     help
       Displayed prompt name for RTT backend.
 
+# RTT 后端轮询输入的毫秒间隔。
 config SHELL_RTT_RX_POLL_PERIOD
     int "RX polling period (in milliseconds)"
     default 10
     help
       Determines how often RTT is polled for RX byte.
 
+# 后续模板以此模块名展开日志队列容量与允许等待时间的设置。
 module = SHELL_BACKEND_RTT
 default-timeout = 100
 source "subsys/shell/Kconfig.template.shell_log_queue_timeout"
@@ -163,6 +178,7 @@ source "subsys/shell/Kconfig.template.shell_log_queue_timeout"
 default-size = 10
 source "subsys/shell/Kconfig.template.shell_log_queue_size"
 
+# 选择启动时允许送入此终端的最高日志等级，由下面的整数选项映射为代码使用的数值。
 choice
     prompt "Initial log level limit"
     default SHELL_RTT_INIT_LOG_LEVEL_DEFAULT
@@ -196,12 +212,14 @@ config SHELL_RTT_INIT_LOG_LEVEL
     default 4 if SHELL_RTT_INIT_LOG_LEVEL_DBG
     default 5 if SHELL_RTT_INIT_LOG_LEVEL_DEFAULT
 
+# 后续模板以此模块名展开日志队列容量与允许等待时间的设置。
 module = SHELL_RTT
 module-str = RTT shell backend
 source "subsys/logging/Kconfig.template.log_config"
 
 endif # SHELL_BACKEND_RTT
 
+# 可选的网络终端需要 TCP 及 IPv4 或 IPv6。
 config SHELL_BACKEND_TELNET
     bool "Enable TELNET backend."
     depends on NET_TCP
@@ -211,12 +229,14 @@ config SHELL_BACKEND_TELNET
 
 if SHELL_BACKEND_TELNET
 
+# Telnet 会话使用的提示符。
 config SHELL_PROMPT_TELNET
     string "Displayed prompt name"
     default "~$ "
     help
       Displayed prompt name for TELNET backend.
 
+# Telnet 后端监听的 TCP 端口。
 config SHELL_TELNET_PORT
     int "Telnet port number"
     default 23
@@ -224,6 +244,7 @@ config SHELL_TELNET_PORT
       This option is used to configure on which port telnet is going
       to be bound.
 
+# 网络发送前暂存输出行的缓冲容量，单位字节。
 config SHELL_TELNET_LINE_BUF_SIZE
     int "Telnet line buffer size"
     default 80
@@ -236,6 +257,7 @@ config SHELL_TELNET_LINE_BUF_SIZE
       A lot of short lines: better reduce this value. On the contrary,
       raise it.
 
+# 网络终端在发送尚未填满的输出缓冲前最多等待的毫秒数。
 config SHELL_TELNET_SEND_TIMEOUT
     int "Telnet line send timeout"
     default 100
@@ -243,6 +265,7 @@ config SHELL_TELNET_SEND_TIMEOUT
       This option can be used to modify the duration of the timer that kick
       in when a line buffer is not empty but did not yet meet the line feed.
 
+# 使后端识别 Telnet 协议的控制命令。
 config SHELL_TELNET_SUPPORT_COMMAND
     bool "Add support for telnet commands (IAC) [Experimental]"
     help
@@ -250,6 +273,7 @@ config SHELL_TELNET_SUPPORT_COMMAND
       However, if proven to be needed at some point, it will be possible
       to extend such support.
 
+# 后续模板以此模块名展开日志队列容量与允许等待时间的设置。
 module = SHELL_TELNET
 default-timeout = 100
 source "subsys/shell/Kconfig.template.shell_log_queue_timeout"
@@ -257,6 +281,7 @@ source "subsys/shell/Kconfig.template.shell_log_queue_timeout"
 default-size = 10
 source "subsys/shell/Kconfig.template.shell_log_queue_size"
 
+# 选择启动时允许送入此终端的最高日志等级，由下面的整数选项映射为代码使用的数值。
 choice
     prompt "Initial log level limit"
     default SHELL_TELNET_INIT_LOG_LEVEL_DEFAULT
@@ -290,12 +315,14 @@ config SHELL_TELNET_INIT_LOG_LEVEL
     default 4 if SHELL_TELNET_INIT_LOG_LEVEL_DBG
     default 5 if SHELL_TELNET_INIT_LOG_LEVEL_DEFAULT
 
+# 后续模板以此模块名展开日志队列容量与允许等待时间的设置。
 module = SHELL_TELNET
 module-str = TELNET shell backend
 source "subsys/logging/Kconfig.template.log_config"
 
 endif # SHELL_TELNET_BACKEND
 
+# 供程序或测试取用 Shell 输出的内存后端。
 config SHELL_BACKEND_DUMMY
     bool "Enable dummy backend."
     help
@@ -304,12 +331,14 @@ config SHELL_BACKEND_DUMMY
 
 if SHELL_BACKEND_DUMMY
 
+# 内存后端使用的提示符。
 config SHELL_PROMPT_DUMMY
     string "Displayed prompt name"
     default "~$ "
     help
       Displayed prompt name for DUMMY backend.
 
+# 内存后端保存 Shell 输出的字节数。
 config SHELL_BACKEND_DUMMY_BUF_SIZE
     int "Size of dummy buffer size"
     default 300

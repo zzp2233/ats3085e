@@ -7,8 +7,8 @@
 #define SPI2_DMA_TIMEOUT_US 40000u                                     /* 从发出 SPI 请求开始计时，收发轮询上限 40 ms。 */
 /* 通道寄存器从 DMA 基址后第一个 0x100 字节窗口开始，各通道占一个窗口。 */
 #define SPI2_DMA_REG(ch, off) (DMA_REG_BASE + ((uint32_t)(ch) + 1u) * 0x100u + (off))    /* 用物理通道号及寄存器偏移计算 MMIO 地址。 */
-static uint8_t spi2_dma_tx[SPI2_DMA_BYTES] __aligned(4);                                 /* 发送缓冲区按四字节对齐，所有帧共用，受 SPI 总线锁保护。 */
-static uint8_t spi2_dma_rx[2u * SPI2_DMA_BYTES] __aligned(4);                            /* 接收区留出两个 512 字节槽，有限传输从首地址写入。 */
+static uint8_t spi2_dma_tx[SPI2_DMA_BYTES] __aligned(4);                                 /* 四字节对齐的 512 字节 PDMA 发送源。上层先装好 s_swap_tx，再由驱动复制到这里；总线锁覆盖硬件读取期间。 */
+static uint8_t spi2_dma_rx[2u * SPI2_DMA_BYTES] __aligned(4);                            /* 连续 1024 字节的 PDMA 接收目的区。有限模式取首部，循环模式轮用偏移 0、512 的两个槽，完成后复制到调用者的 rx。 */
 /* 若无法确认 DMA 已停止，保留通道和缓冲区，避免仍在进行的写入破坏下一请求。 */
 static bool spi2_dma_faulted;     /* 停通道失败后锁存，后续请求拒绝复用缓冲。 */
 static bool spi2_dma_reported;    /* 仅第一次成功输出通道与剩余计数。 */

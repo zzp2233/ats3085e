@@ -323,25 +323,28 @@ static void board_adckey_pinmux_init(void)
   * @brief  在内核设备初始化前设置板级外设引脚。
   * @param  arg：[输入] 初始化框架传入的设备指针，本函数不使用，可为空。
   * @retval 0：完成表项写入；底层无错误返回。
-  * @note   PRE_KERNEL_1 优先级 5 执行；SPI2 的 GPIO57～60 在此接入硬件外设。
+  * @note   通过 SYS_INIT 登记，在 PRE_KERNEL_1 阶段以优先级 5 执行。选入 SPI2 时先在此将 GPIO57～60 接到控制器；Shell 命令稍后通过驱动产生总线事务。
   */
 static int board_early_init(const struct device *arg)
 {
     ARG_UNUSED(arg);                                                                   /* 框架参数不参与板级配置，显式消除未使用告警。 */
     acts_pinmux_setup_pins(board_pin_config, ARRAY_SIZE(board_pin_config));            /* 按表顺序写入已使能外设的复用及电气属性。 */
 
-#if IS_ENABLED(CONFIG_MMC_0)
-    acts_pinmux_setup_pins(board_mmc0_config, ARRAY_SIZE(board_mmc0_config));          /* 接通 MMC0 命令、时钟与四条数据线。 */
-#endif
-#if IS_ENABLED(CONFIG_ADCKEY)
-    board_adckey_pinmux_init();                                                        /* 选择按键模拟采样所用的 GPIO 或 WIO。 */
-#endif
-#if IS_ENABLED(CONFIG_PANEL)
-    acts_pinmux_setup_pins(board_lcd_pin_config, ARRAY_SIZE(board_lcd_pin_config));    /* 恢复或初始化 LCD 总线及电源引脚。 */
-#endif
-#ifdef CONFIG_RTT_CONSOLE
-	jtag_set();                                                                    /* RTT 调试配置下接通调试接口。 */
-#endif
+    #if IS_ENABLED(CONFIG_MMC_0)
+        acts_pinmux_setup_pins(board_mmc0_config, ARRAY_SIZE(board_mmc0_config));          /* 接通 MMC0 命令、时钟与四条数据线。 */
+    #endif
+
+    #if IS_ENABLED(CONFIG_ADCKEY)
+        board_adckey_pinmux_init();                                                        /* 选择按键模拟采样所用的 GPIO 或 WIO。 */
+    #endif
+
+    #if IS_ENABLED(CONFIG_PANEL)
+        acts_pinmux_setup_pins(board_lcd_pin_config, ARRAY_SIZE(board_lcd_pin_config));    /* 恢复或初始化 LCD 总线及电源引脚。 */
+    #endif
+
+    #ifdef CONFIG_RTT_CONSOLE
+        jtag_set();                                                                    /* RTT 调试配置下接通调试接口。 */
+    #endif
 
     return 0;                                                                          /* 本路径完成，返回成功状态。 */
 }

@@ -278,7 +278,7 @@ static int sfile_exchange(struct sfile_sender *x)
   * @param  index：[输入]期待的块号或页偏移。
   * @param  request：[输入]等待确认的请求号。
   * @retval true 全部匹配，false 表示无效、陈旧或与命令不符。
-  * @note   依次核对事务、索引、请求号、回显命令、允许长度和帧 CRC。
+  * @note   QUERY 取回先前操作的回执。CRC16 正确的旧 ACK 仍须丢弃，只有 tid、index、request、回显命令和载荷格式均对应本次请求才接受。
   */
 static bool sfile_ack_matches(const struct sfile_sender *x, uint8_t command,
                               uint32_t index, uint16_t request)
@@ -641,13 +641,13 @@ static int sfile_read_file(void *context, uint32_t index, uint8_t *data,
 }
 
 /**
-  * @brief  从指定数据源读取一块并封装发送，可注入首次 CRC 错误。
-  * @param  x：[输入输出]当前会话的发送器、计数及链路状态。
-  * @param  index：[输入]零基块号，位于当前正文范围内。
-  * @param  repair：[输入]true 表示位图要求重发的块。
-  * @retval 0 完成，其他值为取数或块交换错误。
-  * @note   首发才累计文件 CRC32，修复发送单独计数。
-  */
+ * @brief          从指定数据源读取一块并封装发送，可注入首次 CRC 错误。
+ * @param  x       [输入输出]当前会话的发送器、计数及链路状态。
+ * @param  index   [输入]零基块号，位于当前正文范围内。
+ * @param  repair  [输入]true 表示位图要求重发的块。
+ * @retval         0 完成，其他值为取数或块交换错误。
+ * @note           x->read_block 在 P4 请求中绑定 p4_spi_read，len 是本块有效字节数。首发计入 CRC32，位图要求补发时重读同一块并单独计数。
+ */
 static int sfile_send_data(struct sfile_sender *x, uint32_t index, bool repair)
 {
     uint32_t offset = index * SFILE_DATA_BYTES;                                         /* 数据块序号转换成相对于本次正文起点的偏移。 */
@@ -655,10 +655,10 @@ static int sfile_send_data(struct sfile_sender *x, uint32_t index, bool repair)
     uint8_t *data = s_swap_tx + SFILE_HEADER;                                           /* 直接把文件读入发送块的载荷区，减少一次复制。 */
     int ret;
     if (len > SFILE_DATA_BYTES) len = SFILE_DATA_BYTES;                                 /* 末块只发送剩余有效字节。 */
-    ret = x->read_block(x->source, index, data, len, repair);                           /* 从真实文件或测试生成器读取本块内容。 */
+    ret = x->read_block(x->source, index, data, len, repair);                           /* 按全局块号从源文件回读或现场生成，首次与补发共用这一帧空间；主机无需缓存整组 48,000 字节。 */
     if (ret) return ret;                                                                /* 读取失败时不发送含残留字节的块。 */
     if (!x->source && repair && index == x->bad_block) x->repaired_bad_block = true;    /* 命中指定的生成数据坏块时记下已执行补发。 */
-    if (!repair) x->crc = sfile_crc32(x->crc, data, len);                               /* 仅首次发送时把内容纳入全文件 CRC。 */
+    if (!repair) x->crc = sfile_crc32(x->crc, data, len);                               /* 按原文件顺序累计 CRC32；同一块补发时跳过，整文件校验不会把重发的字节算第二遍。 */
     else ++x->resent;                                                                   /* 重发次数单列，避免重复把同一数据计入校验。 */
     sfile_frame(s_swap_tx, SFILE_MASTER, SFILE_DATA, x->tid, index, 0, len);            /* 封装本次数据块，数据 ACK 靠组结束控制取得。 */
     if (!x->source && !repair && index == x->bad_block)                                 /* 仅为生成数据的指定首发块破坏帧尾 CRC，测试缺块修复。 */
@@ -700,17 +700,17 @@ static int sfile_send_body(struct sfile_sender *x)
             if (ret == SFILE_OK) break;                                        /* 对端已完整接收本组，跳到下一组。 */
             if (ret != SFILE_MISSING) return ret;                              /* 只有明确缺块状态可用位图补发。 */
             if (round == 3u) return -EBADMSG;                                  /* 超过三轮补发仍缺块时停止。 */
-            memcpy(bitmap, s_swap_rx + SFILE_HEADER + 2, sizeof(bitmap));      /* 先复制位图，后续 SPI 交换会覆盖共用的接收区。 */
+            memcpy(bitmap, s_swap_rx + SFILE_HEADER + 2, sizeof(bitmap));      /* 保留本次 ACK 的 13 字节位图。每补一帧都会刷新 s_swap_rx，这份局部副本仍能指出后面缺哪些块。 */
             for (i = 0; i < count; ++i) {
-                if (sfile_bit(bitmap, i)) continue;                            /* 位为一表示从机已经收到，只补发为零的位置。 */
-                ret = sfile_send_data(x, first + i, true);                     /* 仅修复这一位代表的缺块，不重复累计文件 CRC。 */
+                if (sfile_bit(bitmap, i)) continue;                            /* i 从本组零位起算，例如 i=17 对应 bitmap[2] 的 bit 1；只补零位对应的全局块 first+i。 */
+                ret = sfile_send_data(x, first + i, true);                     /* 以相同全局块号重新读源并装 DATA。repair=true 使这个块不会在文件 CRC32 中多算一次。 */
                 if (ret) return ret;
             }
             ret = sfile_end_pair(x);                                           /* 缺块数量可能为奇数，重查之前仍需补齐配对。 */
             if (ret) return ret;
         }
         ++x->groups;                                                           /* 本组已经得到明确成功。 */
-        first += count;                                                        /* 一组确认成功才推进下一组起点。 */
+        first += count;                                                        /* 收到本组 OK 才前移全局块号；48,001 字节的文件在首组 100 块完成后，第二组只剩块 100 的 1 字节。 */
     }
     return 0;                                                                  /* 所有物理数据块已分组确认。 */
 }
@@ -739,11 +739,11 @@ static int sfile_send_http_spec(struct sfile_sender *x, uint8_t *buffer)
 }
 
 /**
-  * @brief  按页读尽从机保留的 HTTP 响应。
-  * @param  x：[输入输出]当前会话的发送器、计数及链路状态。
-  * @retval 0 全部已收，-EBADMSG 为页长不匹配，其他值为控制、回调或写文件错误。
-  * @note   每页最多 400 字节，优先交回调，其次转成串口十六进制或写入文件。
-  */
+ * @brief     按页读尽从机保留的 HTTP 响应。
+ * @param  x  [输入输出]当前会话的发送器、计数及链路状态。
+ * @retval    0 全部已收，-EBADMSG 为页长不匹配，其他值为控制、回调或写文件错误。
+ * @note      每次 HTTP_READ 最多取 400 字节，offset 从响应正文开头算起。P4 用 receive 回调拼回业务缓冲，诊断命令可转为串口十六进制或写入文件。
+ */
 static int sfile_read_http_result(struct sfile_sender *x)
 {
     uint32_t offset = 0;                                                               /* 响应从零偏移开始按页回取。 */
@@ -792,15 +792,15 @@ static int sfile_read_http_result(struct sfile_sender *x)
 }
 
 /**
-  * @brief  在一次唤醒锁内完成主机文件会话、结果回读、链路收尾。
-  * @param  sh：[输入]本次命令的有效 Shell 实例。
-  * @param  x：[输入输出]当前会话的发送器、计数及链路状态。
-  * @param  name：[输入]从机落盘名，可为 NULL 以选择 RAM 或交付命令。
-  * @param  pair：[输入]是否要求配对传输。
-  * @param  hz：[输入]SPI 请求时钟，单位 Hz。
-  * @retval 0 请求完成且收尾通过，负值为参数、模式、存储、远端状态、握手或驱动失败。
-  * @note   持有 x 的调用者可在返回后检查链路故障、HTTP 及首错现场；FINISH 应答丢失时保留远端结果未知。
-  */
+ * @brief        在一次唤醒锁内完成主机文件会话、结果回读、链路收尾。
+ * @param  sh    [输入]本次命令的有效 Shell 实例。
+ * @param  x     [输入输出]当前会话的发送器、计数及链路状态。
+ * @param  name  [输入]从机落盘名，可为 NULL 以选择 RAM 或交付命令。
+ * @param  pair  [输入]是否要求配对传输。
+ * @param  hz    [输入]SPI 请求时钟，单位 Hz。
+ * @retval       0 请求完成且收尾通过，负值为参数、模式、存储、远端状态、握手或驱动失败。
+ * @note         P4 一次请求经 START_HTTP、HTTP_META、DATA、GROUP_END、FINISH 传给 503，有响应正文再发 HTTP_READ。FINISH 回执丢失时这笔远端请求结果仍未知。
+ */
 static int sfile_run_context(const struct shell *sh, struct sfile_sender *x, const char *name, bool pair,
                      uint32_t hz)
 {
@@ -1247,13 +1247,16 @@ static int shell_spi2filetest(const struct shell *sh, size_t argc, char *argv[])
   * @brief  用生成数据验证不落盘的单块授权路径。
   * @param  sh：[输入]本次命令的有效 Shell 实例。
   * @param  argc：[输入]含命令名在内的参数项数。
-  * @param  argv：[输入]块数及可选坏块号。
-  * @retval 0 成功，负值为参数、链路或远端错误。
+  * @param  argv：[输入]argv[0] 为子命令名；argv[1] 是十进制块数字符串；可选的 argv[2] 是从零起算的注错块号。
+  * @retval 0 成功；-EINVAL 表示参数项数、数字格式或范围错误；其他负值来自文件会话。
   * @note   可指定一块首次发送时破坏 CRC，验证接收位图和补传。
   */
 static int shell_spi2ram(const struct shell *sh, size_t argc, char *argv[])
 {
+    /* 输入 app spi2ram 8 时，根命令已被 Shell 消耗，本函数收到两项：spi2ram 和 8。 */
     if (argc != 2 && argc != 3) return -EINVAL;
+
+    /* 下层解析并校验十进制参数；省略坏块号时传空，目标文件名为空时对端在 RAM 中接收。 */
     return sfile_run_generated(sh, argv[1], argc == 3 ? argv[2] : NULL, NULL, false,    /* 只用从机 RAM 收块，按单块授权。 */
                                SFILE_DEFAULT_HZ);
 }

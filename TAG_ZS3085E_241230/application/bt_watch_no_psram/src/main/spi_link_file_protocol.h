@@ -5,12 +5,12 @@
 #define SFILE_MASTER 0xacu                                                  /* 文件协议主机发送方向。 */
 #define SFILE_SLAVE 0xcau                                                   /* 从机返回方向，与测试图案协议区分。 */
 #define SFILE_VERSION 1u                                                    /* 线布局版本，收发两端必须一致。 */
-#define SFILE_HEADER 16u                                                    /* 文件头大小，单位字节，决定有效载荷的起点。 */
+#define SFILE_HEADER 16u                                                    /* 文件协议帧头占前 16 字节。其后最多 480 字节正文，尾部 CRC16 始终位于偏移 510、511。 */
 #define SFILE_DATA_BYTES 480u                                               /* 单块可承载的文件或控制数据上限，单位字节。 */
-#define SFILE_GROUP 100u                                                    /* 每次位图确认最多覆盖 100 个数据块。 */
+#define SFILE_GROUP 100u                                                    /* 按最多 100 个 DATA 块确认一组，满组正文为 100 × 480 = 48,000 字节。组是对账范围，不另包成一个 SPI 帧。 */
 #define SFILE_DELIVERY_MAX_HOLD_MS 15000u                                   /* 交付诊断允许请求的最大静默毫秒数。 */
-#define SFILE_BITMAP 13u                                                    /* 接收 100 个槽的状态需向上取整为 13 字节。 */
-#define SFILE_ACK_BYTES (2u + SFILE_BITMAP)                                 /* 普通 ACK 为回显命令、状态字节及整组位图。 */
+#define SFILE_BITMAP 13u                                                    /* 覆盖 100 个组内位置需要 13 字节；1 表示已收到，末字节和尾组中超出实际块数的位不用于补传。 */
+#define SFILE_ACK_BYTES (2u + SFILE_BITMAP)                                 /* 普通 ACK 载荷共 15 字节，即原命令、处理状态和 13 字节接收位图。收到 ACK 后仍须读取状态。 */
 #define SFILE_DEVICE_INFO_BYTES 20u                                         /* 设备信息为版本、4 字节小端 UTC 秒数、15 个 ASCII 数字的 IMEI。 */
 #define SFILE_HTTPS_SEED_BYTES 48u                                          /* 从主机硬件 TRNG 取得 48 字节后交给从机 TLS。 */
 #define SFILE_HTTPS_START_FIXED (4u + SFILE_HTTPS_SEED_BYTES)               /* HTTPS 开始参数先放正文长度，再放随机种子。 */
@@ -84,17 +84,17 @@ static inline void sfile_put32(uint8_t *p, uint32_t value)
 
 /* 16 字节头依次存方向、版本、命令、保留字节、传输号、索引、请求号和载荷长度。块尾 CRC 仅覆盖头及有效载荷。 */
 /**
-  * @brief  封装文件传输块的地址、请求标识、载荷长度与 CRC16。
-  * @param  p：[输入输出]512 字节块，载荷已备好。
-  * @param  direction：[输入]主机或从机方向标识。
-  * @param  command：[输入]本块协议命令。
-  * @param  tid：[输入]传输标识。
-  * @param  index：[输入]数据块号或控制命令约定的索引。
-  * @param  request：[输入]用于匹配控制 ACK 的请求号。
-  * @param  len：[输入]已填的有效载荷长度，0～480 字节。
-  * @retval 无。
-  * @note   调用前把有效载荷写在偏移 16 处。CRC 放在块尾，只覆盖头和有效载荷。
-  */
+ * @brief             封装文件传输块的地址、请求标识、载荷长度与 CRC16。
+ * @param  p          [输入输出]512 字节块，载荷已备好。
+ * @param  direction  [输入]主机或从机方向标识。
+ * @param  command    [输入]本块协议命令。
+ * @param  tid        [输入]传输标识。
+ * @param  index      [输入]DATA 使用本次正文内的块号，GROUP_END 使用组首块号，HTTP_META 和 HTTP_READ 分别使用规格和响应内的字节偏移。
+ * @param  request    [输入]用于匹配控制 ACK 的请求号。
+ * @param  len        [输入]已填的有效载荷长度，0～480 字节。
+ * @retval            无。
+ * @note              调用前把有效载荷写在偏移 16 处。CRC 放在块尾，只覆盖头和有效载荷。
+ */
 static inline void sfile_frame(uint8_t *p, uint8_t direction, uint8_t command,
                                uint32_t tid, uint32_t index, uint16_t request,
                                uint16_t len)
@@ -107,7 +107,7 @@ static inline void sfile_frame(uint8_t *p, uint8_t direction, uint8_t command,
     sfile_put32(p + 8, index);                                             /* 数据块号或控制操作约定的索引。 */
     sfile_put16(p + 12, request);                                          /* 写本请求号以排除旧 ACK。 */
     sfile_put16(p + 14, len);                                              /* 有效载荷的实际字节数，尾块可不足 480 字节。 */
-    sfile_put16(p + SFILE_CRC_OFFSET, swap_crc(p, SFILE_HEADER + len));    /* 将头及有效载荷的 CRC16 固定写在整个块的最后两个字节。 */
+    sfile_put16(p + SFILE_CRC_OFFSET, swap_crc(p, SFILE_HEADER + len));    /* 帧尾第 510、511 字节保存 CRC16；若最后一块只有 1 字节正文，本帧只对头和正文共 17 字节求 CRC。 */
 }
 
 /**

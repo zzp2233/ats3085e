@@ -50,8 +50,8 @@
 #ifdef CONFIG_SHELL
 
 #if IS_ENABLED(CONFIG_SPI_2)
-static uint8_t s_swap_tx[SWAP_BLOCK_SIZE];                   /* 最大块长为 512 字节，单帧压测和文件收发共用静态发送区。 */
-static uint8_t s_swap_rx[SWAP_BLOCK_SIZE];                   /* 两种传输长度复用同一缓冲区。 */
+static uint8_t s_swap_tx[SWAP_BLOCK_SIZE];                   /* 主机应用共用的 512 字节发送区。文件路径把帧头和本块正文装进这里，再由驱动复制到 spi2_dma_tx。 */
+static uint8_t s_swap_rx[SWAP_BLOCK_SIZE];                   /* 本次事务的 512 字节 MISO 副本。后续 QUERY 或补发 DATA 都会覆盖它，位图要先取走。 */
 static bool s_swap_circular_used;                            /* 环形流水一旦使用，不能切回少一块确认延迟的旧压测入口。 */
 
 /* 首发和重发共用同一时钟与段间节拍。 */
@@ -422,7 +422,7 @@ static int shell_spi2swapblock2(const struct shell *sh, size_t argc, char *argv[
 
 #include "spi_link_circular.h"                                       /* V11 双槽环形模式采用两块确认延迟，独立于前述单级流水。 */
 #if IS_ENABLED(CONFIG_FILE_SYSTEM)
-#include "spi_link_file_host.h"                                      /* 文件环形主机与 HTTP 路径复用 SPI2 静态块缓冲和 READY。 */
+#include "spi_link_file_host.h"                                      /* 在当前编译单元展开静态处理函数，命令表可直接保存 shell_spi2ram 的地址；map 中该函数归入 system_app_shell.c.obj。 */
 #include "spi_link_p4.h"                                             /* 诊断资源构建从这里接入板端录音上传状态机。 */
 #endif
 
@@ -2046,9 +2046,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(acts_app_cmds,                                   
     SHELL_CMD(spi2swapblock2, NULL, "V10 512B/2 frames [1..10000 blocks] [0..1000 gap_ms] [100000..8000000 Hz]", shell_spi2swapblock2),            /* 一个 512 字节物理块容纳两个独立的 V3 帧。 */
     SHELL_CMD(spi2circ, NULL, "V11 hardware RX ring/2-block ACK [1..10000 blocks] [0..1000 gap_ms] [100000..8000000 Hz]", shell_spi2circ),         /* 环形槽的应答比当前请求落后两个块。 */
 #if IS_ENABLED(CONFIG_FILE_SYSTEM)
-    SHELL_CMD(spi2file, NULL, "Send a local file at 4 MHz <source path> <destination basename>", shell_spi2file),                                  /* 将本地文件复制到从机指定的目标名。 */
+    SHELL_CMD(spi2file, NULL, "Send a local file at 4 MHz <source path> <destination basename>", shell_spi2file),                                  /* app 子表的文件命令。z_shell_find_cmd 按 syntax 匹配，exec_cmd 把源路径和目标文件名传给 shell_spi2file。 */
     SHELL_CMD(spi2filetest, NULL, "Send generated data <1..10000 blocks> <destination basename> [bad block index]", shell_spi2filetest),           /* 生成可复算的文件，支持指定首发坏块。 */
-    SHELL_CMD(spi2ram, NULL, "Benchmark SPI to UMA503 RAM at 4 MHz <1..10000 blocks> [bad block index]", shell_spi2ram),                           /* 单块授权的 RAM 文件压测，不要求从机落盘。 */
+    SHELL_CMD(spi2ram, NULL, "Benchmark SPI to UMA503 RAM at 4 MHz <1..10000 blocks> [bad block index]", shell_spi2ram),                           /* 在 app 子命令表中将 spi2ram 绑定到 shell_spi2ram；当前构建需同时启用 Shell、板级 SPI2 和文件系统。 */
 #ifdef P4_EMBEDDED_VALIDATION
     SHELL_CMD(p4upload, NULL, "Upload embedded M4A [14-digit test localFileId]; reuse ID on retry", shell_p4upload),                               /* 仅验证资源固件注册板端 P4 入口，重试相同 ID 可对账。 */
 #endif
@@ -2112,5 +2112,5 @@ static int cmd_acts_app(const struct shell *shell, size_t argc, char **argv)
 	return -EINVAL;                                                      /* 根命令收到未知参数。 */
 }
 
-SHELL_CMD_REGISTER(app, &acts_app_cmds, "Application shell commands", cmd_acts_app);    /* 注册app根命令，框架按子命令表分派到对应函数。 */
+SHELL_CMD_REGISTER(app, &acts_app_cmds, "Application shell commands", cmd_acts_app);    /* 登记根命令 app 及其子命令表 acts_app_cmds；匹配 spi2ram 时，Shell 执行该子项保存的处理函数。 */
 #endif

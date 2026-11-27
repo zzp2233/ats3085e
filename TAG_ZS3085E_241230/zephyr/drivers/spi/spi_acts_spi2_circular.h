@@ -2,7 +2,7 @@
 #ifndef SPI_ACTS_SPI2_CIRCULAR_H_    /* 保证静态会话和外部入口只定义一次。 */
 #define SPI_ACTS_SPI2_CIRCULAR_H_
 #if defined(CONFIG_SOC_SERIES_LEOPARD) && defined(CONFIG_PDMA_ACTS)    /* 当前实现直接使用 LEOPARD 的 PDMA 通道寄存器。 */
-#define SPI2_CIRC_BYTES 512u                                           /* 每次片选传输的有效负载为 512 字节。 */
+#define SPI2_CIRC_BYTES 512u                                           /* 一次硬件片选下交换 512 个字节，MOSI 和 MISO 共用时钟。文件 DATA 的有效正文最多为其中的 480 字节。 */
 #define SPI2_CIRC_RING_BYTES (2u * SPI2_CIRC_BYTES)                    /* 接收区含两个等长槽，第二个槽末尾触发硬件重载。 */
 #define SPI2_CIRC_TIMEOUT_US 100000u                                   /* 单块完成轮询的时间预算为 100 ms。 */
 #define SPI2_CIRC_RELOAD_GRACE_US 20u                                  /* 仅允许环尾重载过程中短暂采到 20 µs 以内的停机状态。 */
@@ -10,7 +10,7 @@
 static struct {
     const struct device *dev, *dma;    /* 分别保存总线所有者的 SPI 设备和实际 PDMA 设备。 */
     int rxch, txch;                    /* 会话期间独占的接收和发送物理通道号。 */
-    uint32_t blocks, rx_starts;        /* 成功块数决定下个槽，接收启动次数用于检查持续搬运。 */
+    uint32_t blocks, rx_starts;        /* blocks 每成功交付一帧才加一，奇偶决定 A/B；rx_starts 记录本会话接收通道的启动次数。 */
     bool active, failed;               /* active 表示持锁，failed 表示须关闭会话再继续。 */
 } spi2_circ;
 
@@ -62,91 +62,183 @@ int spi_acts_spi2_circular_close(const struct device *dev)
 }
 
 /**
-  * @brief  取得 SPI2 总线并启动跨帧持续工作的接收环。
-  * @param  dev：[输入]已绑定的 SPI2 设备对象，非空，由设备模型持有。
-  * @param  config：[输入]非空，主机、Mode 3、8 位、硬件片选 0，请求 100 kHz～8 MHz；实际频率还受 HOSC 分频档限制。
-  * @retval 0 表示可收发。-EINVAL 为配置无效，-EBUSY 为会话已开启，-ENOTSUP 为平台、实例或存储区不符，-ENODEV 为 DMA 设备不可用，-EIO 为隔离或重载位异常。申请、时钟、配置与启动错误原样返回。
-  * @note   持唤醒锁的同一线程配对调用 open、transfer 和 close。成功后跨帧持有设备锁；申请过程失败时自行回收已取得的资源。
-  */
+ * @brief          取得 SPI2 总线并启动跨帧持续工作的接收环。
+ * @param  dev：   [输入]已绑定的 SPI2 设备对象，非空，由设备模型持有。
+ * @param  config：[输入]非空，主机、Mode 3、8 位、硬件片选 0，请求 100 kHz～8 MHz；实际频率还受 HOSC 分频档限制。
+ * @retval         0 表示可收发。-EINVAL 为配置无效，-EBUSY 为会话已开启，-ENOTSUP 为平台、实例或存储区不符，-ENODEV 为 DMA 设备不可用，-EIO 为隔离或重载位异常。申请、时钟、配置与启动错误原样返回。
+ * @note           持唤醒锁的同一线程配对调用 open、transfer 和 close。成功后跨帧持有设备锁；申请过程失败时自行回收已取得的资源。
+ * @note           全函数分四段：校验（阶段 1-3）、拿资源（阶段 4-9）、搭接收环（阶段 10-13）、启动（阶段 14）。失败统一在 fail 标签回收。
+ */
 int spi_acts_spi2_circular_open(const struct device *dev, const struct spi_config *config)
 {
-    const struct acts_spi_config *cfg;                                                 /* 用板级配置确认实例和 DMA 所有权。 */
-    struct acts_spi_data *data;                                                        /* 获取包含设备锁与配置缓存的运行数据。 */
-    struct acts_spi_controller *spi;                                                   /* 使用 SPI 寄存器控制片选、FIFO 和外设请求。 */
-    struct dma_config dc = {0};                                                        /* 从全零配置建立 RX 通道，默认无回调。 */
-    struct dma_block_config block = {0};                                               /* 单个 DMA 块描述整块连续的 1024 字节接收区。 */
-    int ret;                                                                           /* 保存各阶段返回状态，失败时原样报告。 */
+    const struct acts_spi_config *cfg;      /* 板级静态配置：实例号、时钟号、复位号、DMA 归属。 */
+    struct acts_spi_data *data;             /* 驱动运行数据：总线锁 ctx、配置缓存、实测频率 spi2_hz。 */
+    struct acts_spi_controller *spi;        /* SPI 寄存器窗口：片选、FIFO、读写请求都在这里。 */
+    struct dma_config dc = {0};             /* PDMA 通道配置，全零起步：不注册回调、不启用中断。 */
+    struct dma_block_config block = {0};    /* 单块描述：源、目的、块长、是否重载。 */
+    int ret;                                /* 各阶段返回码，失败时原样上抛给调用者。 */
 
-    /* 先校验固定格式、板级实例与 SRAM 可达性。 */
+    /* 阶段 1｜参数与平台校验：确认调用者要的正是"主机 + Mode 3 + 8 位 + 硬件片选"这一种组合。 */
+    /* 校验全部在碰寄存器之前完成，任一项不符直接返回，不会留下配了一半的外设。 */
+    /* operation 是整位相等比较而非掩码比较：多带一个位（例如双线模式）也会被拒。 */
     if (!dev || !config || config->operation !=
         (SPI_OP_MODE_MASTER | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8)) ||
         config->cs || config->slave || config->frequency < 100000u ||
-        config->frequency > 8000000u) return -EINVAL;                                  /* 仅接受指定频率范围、硬件片选和精确的八位 Mode 3 主机配置。 */
-    if (spi2_circ.active) return -EBUSY;                                               /* 同一时间只能有一个循环会话。 */
-    cfg = DEV_CFG(dev);                                                                /* 取得实例配置。 */
-    data = DEV_DATA(dev);                                                              /* 取得设备运行上下文。 */
-    spi = cfg->spi;                                                                    /* 将操作绑定到当前实例的寄存器地址。 */
-    if (cfg->clock_id != CLOCK_ID_SPI2 || cfg->spi_3wire || cfg->flag_use_dma ||
-        !spi2_dma_internal_ram(spi2_dma_tx, SPI2_CIRC_BYTES) ||
-        !spi2_dma_internal_ram(spi2_dma_rx, SPI2_CIRC_RING_BYTES)) return -ENOTSUP;    /* 保证是四线 SPI2、无常规 DMA 占用，且整个 TX 与双槽 RX 均位于 SRAM。 */
-    spi2_circ.dma = device_get_binding(CONFIG_DMA_0_NAME);                             /* 以名称取得实际物理 DMA 控制器。 */
-    if (!spi2_circ.dma) return -ENODEV;                                                /* 无法绑定时尚未持锁，可直接返回。 */
-    spi_context_lock(&data->ctx, false, NULL);                                         /* 取得总线所有权直至 close；避免并行走 FIFO 或有限 DMA。 */
-    if (spi2_dma_faulted) { k_sem_give(&data->ctx.lock); return -EIO; }                /* 上次停机失败已隔离缓冲，此次应归还锁并报告错误。 */
-
-    /* 建立可被 close 回收的会话状态，再进行可能失败的分配。 */
-    spi2_circ.dev = dev;                                                               /* 记录所有者设备，收发和关闭时均校验。 */
-    spi2_circ.active = true;                                                           /* 标记会话已建立，使后续失败也能走统一关闭逻辑。 */
-    spi2_circ.failed = false;                                                          /* 新会话尚未发生传输错误。 */
-    spi2_circ.blocks = 0;                                                              /* 第一帧对应接收区前半部。 */
-    spi2_circ.rx_starts = 0;                                                           /* 从零统计 RX 的实际启动次数。 */
-    spi2_circ.rxch = spi2_circ.txch = -1;                                              /* 两个负数表示通道都还未取得。 */
-    /* 即使下一步分配失败，也须保持片选无效且无 SPI 时钟请求。 */
-    spi->ctrl &= ~(SPI_CTL_RX_DRQ_EN | SPI_CTL_TX_DRQ_EN | SPI_CTL_WR_MODE_MASK);      /* 同时屏蔽收发请求和读写，防止申请期间产生时钟。 */
-    spi->ctrl |= SPI_CTL_SS;                                                           /* 保持硬件片选无效。 */
-    spi2_circ.rxch = dma_request(spi2_circ.dma, 0xffu);                                /* 从公共池动态申请 RX 通道。 */
-    if (spi2_circ.rxch < 0) { ret = spi2_circ.rxch; goto fail; }                       /* 保留分配失败原因并走清理。 */
-    spi2_circ.txch = dma_request(spi2_circ.dma, 0xffu);                                /* 独立申请用于有限发送的 TX 通道。 */
-    if (spi2_circ.txch < 0) { ret = spi2_circ.txch; goto fail; }                       /* 分配失败时回收此前取得的 RX。 */
-    data->ctx.config = NULL;                                                           /* 使总线配置缓存失效，强制重新设置时钟和模式。 */
-    ret = spi_acts_configure(cfg, data, config);                                       /* 应用调用者配置并核对时钟。 */
-    if (ret) goto fail;                                                                /* 配置失败时关闭会话并归还锁。 */
-    memset(spi2_dma_rx, 0xa5, SPI2_CIRC_RING_BYTES);                                   /* 原始缓冲填入哨兵，整个接收环准备由硬件覆盖。 */
-    spi->ctrl = (spi->ctrl & ~(SPI_CTL_WR_MODE_MASK | SPI_CTL_DMS_MASK |
-        SPI_CTL_TX_DRQ_EN | SPI_CTL_RX_DRQ_EN | SPI_CTL_RX_FIFO_EN |
-        SPI_CTL_TX_FIFO_EN)) | SPI_CTL_SS | SPI_CTL_CLK_SEL_DMA;                       /* 在片选未使能时切入 DMA 路径，清空旧读写使能状态。 */
-    spi->status = SPI_STATUS_ERR_MASK;                                                 /* 写一清除上次遗留的 SPI 错误。 */
-
-    /* 在一块连续 SRAM 上配置两槽 RX 环。 */
-    block.source_address = (uint32_t)&spi->rxdat;                                      /* DMA 源为固定接收数据寄存器。 */
-    block.dest_address = (uint32_t)spi2_dma_rx;                                        /* DMA 目的为两个相邻的片内槽。 */
-    block.block_size = SPI2_CIRC_RING_BYTES;                                           /* 一个 DMA 块同时覆盖前、后两个槽。 */
-    block.dest_reload_en = 1;                                                          /* 到达环末端时让硬件重新装载目的地址和计数。 */
-    dc.dma_slot = CONFIG_SPI_2_DMA_ID;                                                 /* 选用板级 SPI2 请求号。 */
-    dc.channel_direction = PERIPHERAL_TO_MEMORY;                                       /* RX 的方向是外设到内存。 */
-    dc.source_data_size = dc.dest_data_size = 1;                                       /* 两端以字节为元素，RC 可直接按字节解释。 */
-    dc.source_burst_length = dc.dest_burst_length = 8;                                 /* 请求突发配置为 8。 */
-    dc.block_count = 1;                                                                /* 用单个重载块描述环，无需两条软件链表描述符。 */
-    dc.head_block = &block;                                                            /* 将栈上的块配置交给驱动同步编程。 */
-    /* 不使用通道回调，中断待决寄存器仍锁存半传输和整块完成事件。 */
-    ret = dma_config(spi2_circ.dma, spi2_circ.rxch, &dc);                              /* 配置 RX 通道，不传入中断回调。 */
-    if (ret) goto fail;                                                                /* 配置失败时无需启动。 */
-    if (!(sys_read32(SPI2_DMA_REG(spi2_circ.rxch, 0)) & SPI2_CIRC_RELOAD)) {           /* 从硬件回读 RELOAD 位，确认能够跨块持续接收。 */
-        ret = -EIO; goto fail;                                                         /* 重载未生效时禁止以循环模式运行。 */
+        config->frequency > 8000000u)
+    {
+        return -EINVAL;
     }
 
-    /* 启动持续接收，但等每次 transfer 才开放有限 TX。 */
-    spi->ctrl |= SPI_CTL_RX_FIFO_EN | SPI_CTL_TX_FIFO_EN;                              /* 打开收发 FIFO，以便后续 SPI 请求得到服务。 */
-    ret = dma_start(spi2_circ.dma, spi2_circ.rxch);                                    /* 整个会话只在此启动一次 RX。 */
-    if (ret) goto fail;                                                                /* 启动失败时关闭已配置资源。 */
-    ++spi2_circ.rx_starts;                                                             /* 记录已成功发出的 RX 启动动作。 */
-    spi->ctrl |= SPI_CTL_RX_DRQ_EN;                                                    /* 放开接收请求，发送侧仍关闭，因此此刻无新 SPI 时钟。 */
+    /* 阶段 2｜会话互斥：上一次 open 没有 close，硬件和通道都还挂在旧会话上，不能重入。 */
+    if (spi2_circ.active)
+    {
+        return -EBUSY;
+    }
+
+    /* 阶段 3｜平台自检：确认这个构建和这块板确实支持"四线 SPI2 + 片内 DMA 缓冲"。 */
+    /* clock_id 必须是 SPI2，防止实例串位；spi_3wire 为 0 表示四线；flag_use_dma 为 0 表示普通 SPI 通路没占 DMA。 */
+    /* 两个缓冲区必须落在片内 SRAM：PDMA 只能访问 SRAM，落到外部 NOR/PSRAM 会静默失败，不报错也不搬数据。 */
+    cfg  = DEV_CFG(dev);
+    data = DEV_DATA(dev);
+    spi  = cfg->spi;
+    if (cfg->clock_id != CLOCK_ID_SPI2 || cfg->spi_3wire || cfg->flag_use_dma ||
+        !spi2_dma_internal_ram(spi2_dma_tx, SPI2_CIRC_BYTES) ||
+        !spi2_dma_internal_ram(spi2_dma_rx, SPI2_CIRC_RING_BYTES))
+    {
+        return -ENOTSUP;
+    }
+
+    /* 阶段 4｜按名字取到 PDMA 控制器。此时还没持锁，失败可以直接返回，不需要清理。 */
+    spi2_circ.dma = device_get_binding(CONFIG_DMA_0_NAME);
+    if (!spi2_circ.dma)
+    {
+        return -ENODEV;
+    }
+
+    /* 阶段 5｜拿总线锁。等价于 STM32 的 __HAL_LOCK，区别是这把锁要一直持有到 close。 */
+    /* 期间别的线程既不能走 CPU FIFO 通路，也不能走普通 DMA 通路，否则两条路径抢同一个 FIFO。 */
+    spi_context_lock(&data->ctx, false, NULL);
+
+    /* spi2_dma_faulted 是上一次 close 没停干净留下的隔离标记：缓冲内容已不可信，只能等重启。 */
+    if (spi2_dma_faulted)
+    {
+        k_sem_give(&data->ctx.lock);
+        return -EIO;
+    }
+
+    /* 阶段 6｜把会话状态写成"可被 close 回收"的初值。 */
+    /* active 要先置 true：这样后面任何一步失败都能走统一 close；close 按 -1 判断"通道还没申请到"，跳过停止动作。 */
+    spi2_circ.dev       = dev;
+    spi2_circ.active    = true;
+    spi2_circ.failed    = false;
+    spi2_circ.blocks    = 0;
+    spi2_circ.rx_starts = 0;
+    spi2_circ.rxch      = spi2_circ.txch = -1;      /* -1 表示尚未申请，close 据此不去停止一个不存在的通道。 */
+
+    /* 阶段 7｜总线静音：把"我要数据"的请求全部掐掉，并让硬件片选保持无效。 */
+    /* 只要 RX_DRQ_EN/TX_DRQ_EN 还开着，FIFO 一空就会向 PDMA 发请求、进而产生 SPI 时钟； */
+    /* 后面申请通道、写 DMA 描述的这段时间里从机不能被打扰，所以必须先关请求再动机器。 */
+    spi->ctrl &= ~(SPI_CTL_RX_DRQ_EN | SPI_CTL_TX_DRQ_EN | SPI_CTL_WR_MODE_MASK);
+    spi->ctrl |= SPI_CTL_SS;                        /* SS 置 1：硬件片选保持无效，不选中从机。 */
+
+    /* 阶段 8｜从 PDMA 公共池里领两个物理通道：RX 一个、TX 一个。 */
+    /* 0xff 表示"随便给一个空闲的"，返回的是通道号，不是请求号；请求号 9 稍后写进通道控制字。 */
+    /* 池子被占满时 dma_request 返回负值，这里不做手工归还，交给 fail 标签统一回收。 */
+    spi2_circ.rxch = dma_request(spi2_circ.dma, 0xffu);
+    if (spi2_circ.rxch < 0)
+    {
+        ret = spi2_circ.rxch;
+        goto fail;
+    }
+
+    spi2_circ.txch = dma_request(spi2_circ.dma, 0xffu);
+    if (spi2_circ.txch < 0)
+    {
+        ret = spi2_circ.txch;
+        goto fail;
+    }
+
+    /* 阶段 9｜配置时钟与传输格式，并回读校验实际频率。 */
+    /* 先把 ctx.config 置空是必须的：spi_acts_configure 以"配置指针是否相同"判断要不要重配， */
+    /* 指针相同就直接返回，分频压根不会重算，所以这里要先作废缓存强制它走一遍。 */
+    data->ctx.config = NULL;
+
+    ret = spi_acts_configure(cfg, data, config);
+    if (ret)
+    {
+        goto fail;
+    }
+
+    /* 阶段 10｜切到 DMA 通路，并把接收区先"弄脏"。 */
+    /* 0xa5 哨兵：某段若没被硬件覆盖，读回来是 0xa5 而不是旧数据，一眼能看出漏收。 */
+    /* ctrl 里清 FIFO 使能和读写模式位，再选 CLK_SEL_DMA，表示读写由 DMA 请求驱动，而不是 CPU 逐字节访问。 */
+    memset(spi2_dma_rx, 0xa5, SPI2_CIRC_RING_BYTES);
+
+    spi->ctrl = (spi->ctrl & ~(SPI_CTL_WR_MODE_MASK | SPI_CTL_DMS_MASK |
+        SPI_CTL_TX_DRQ_EN | SPI_CTL_RX_DRQ_EN | SPI_CTL_RX_FIFO_EN |
+        SPI_CTL_TX_FIFO_EN)) | SPI_CTL_SS | SPI_CTL_CLK_SEL_DMA;
+
+    spi->status = SPI_STATUS_ERR_MASK;              /* 状态位写 1 清除，先清掉上次遗留的溢出/错误标志。 */
+
+    /* 阶段 11｜描述接收环：一整块 1024 字节片内 SRAM，由硬件自己循环使用。 */
+    /* 源地址固定为接收数据寄存器，等价 STM32 的 &SPI2->DR，所以控制字里要设"源地址恒定"。 */
+    /* 块长 1024 = A 槽 512 + B 槽 512；写完 B 槽末尾后硬件重装地址与计数、回到 A 槽开头。 */
+    /* 一个重载块就描述完整个环，不需要把两块串成链表。 */
+    block.source_address   = (uint32_t)&spi->rxdat;
+    block.dest_address     = (uint32_t)spi2_dma_rx;
+    block.block_size       = SPI2_CIRC_RING_BYTES;
+    block.dest_reload_en   = 1;                     /* 置硬件重载位，等价 STM32 的 DMA 循环模式（CIRC=1）。 */
+
+    /* 通道侧配置。dma_slot = 9 是 SPI2 的请求号，不是通道号：本芯片没有固定映射表， */
+    /* 靠控制字低 6 位告诉硬件"这条通道去服务谁"。 */
+    dc.dma_slot            = CONFIG_SPI_2_DMA_ID;
+    dc.channel_direction   = PERIPHERAL_TO_MEMORY;
+    dc.source_data_size    = dc.dest_data_size = 1; /* 两端按字节计，RC 寄存器可直接当字节数读。 */
+    dc.source_burst_length = dc.dest_burst_length = 8;
+    dc.block_count         = 1;                     /* 一个块够用：靠重载位循环，而不是多块链。 */
+    dc.head_block          = &block;
+
+    /* 阶段 12｜把描述写进硬件：saddr0 / daddr0 / bc / ctl，重载请求在这里转成 CTL 的 bit18。 */
+    /* 不注册回调，半传输与整块完成只锁存在中断待决寄存器里，由 transfer 主动查。 */
+    ret = dma_config(spi2_circ.dma, spi2_circ.rxch, &dc);
+    if (ret)
+    {
+        goto fail;
+    }
+
+    /* 阶段 13｜回读校验：写进去不等于生效。 */
+    /* 读 RX 通道 CTL 的 bit18（SPI2_CIRC_RELOAD）。为 0 说明循环模式没建立，只有一次 1024 字节搬运， */
+    /* A/B 双槽的假设整体失效，表现为跑几十块后突然超时、数据错位。宁可在开门时拒，也不带"假环"跑业务。 */
+    if (!(sys_read32(SPI2_DMA_REG(spi2_circ.rxch, 0)) & SPI2_CIRC_RELOAD))
+    {
+        ret = -EIO;
+        goto fail;
+    }
+
+    /* 阶段 14｜先开 FIFO，再启动 RX，最后才放开接收请求，三步顺序不能换。 */
+    /* 通道没跑起来就开请求，第一批数据会被丢；而 RX_DRQ_EN 一开，FIFO 空就拉请求、出时钟。 */
+    /* TX 请求此处仍保持关闭，等每次 transfer 时才临时开有限的一批。 */
+    spi->ctrl |= SPI_CTL_RX_FIFO_EN | SPI_CTL_TX_FIFO_EN;
+
+    ret = dma_start(spi2_circ.dma, spi2_circ.rxch);
+    if (ret)
+    {
+        goto fail;
+    }
+
+    ++spi2_circ.rx_starts;                          /* 累计启动次数，transfer 用它确认"这一轮环确实重开过"。 */
+
+    spi->ctrl |= SPI_CTL_RX_DRQ_EN;                 /* 只放开接收请求；从此刻起从机一有数据就会出时钟。 */
+
     printk("SPI11 DMA open rx_reload=1 ring=1024 tx_finite=512 rxch=%d txch=%d rev=11a-wrap\n",
-           spi2_circ.rxch, spi2_circ.txch);                                            /* 报告会话初始通道和缓冲布局。 */
-    return 0;                                                                          /* 成功返回时仍持有 SPI 设备锁。 */
+           spi2_circ.rxch, spi2_circ.txch);         /* 诊断行：通道号与缓冲布局，用来和实机日志对账。 */
+
+    return 0;                                       /* 成功返回时仍持有 SPI 设备锁，由 close 释放。 */
+
 fail:
-    (void)spi_acts_spi2_circular_close(dev);                                           /* 启动阶段失败时使用同一关闭逻辑回收部分建立的状态。 */
-    return ret;                                                                        /* 报告导致打开失败的原始错误。 */
+    /* 阶段 15｜统一回收。active 在阶段 6 已置 true，close 能处理"通道只领了一半、FIFO 只开了一半"的半成品。 */
+    (void)spi_acts_spi2_circular_close(dev);
+    return ret;
 }
 
 /**
@@ -155,7 +247,7 @@ fail:
   * @param  tx：[输入]非空且可读的 512 字节，函数先复制到内部 SRAM。
   * @param  rx：[输出]非空且可写的 512 字节，仅在整块校验通过后交付。
   * @retval 0 表示交付 512 字节，-EPERM 为会话无效，-EINVAL 为空缓冲，-EIO 为硬件状态、事件或计数不符，-ETIMEDOUT 为超过 100 ms，其他负值来自 DMA。无平台支持时返回 -ENOTSUP。
-  * @note   调用者先消费对端的一次 READY。每次只启动有限 TX，RX 保持重载；进入硬件故障分支后必须 close。
+  * @note   调用者按当前单块或配对规则取得 READY。函数同步等待有限 TX、持续重载的 RX 和 SPI 线路均达到本槽的结束条件，将 512 字节复制到 rx 后才返回成功。硬件故障后须 close。
   */
 int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx, uint8_t *rx)
 {
@@ -167,8 +259,10 @@ int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx,
     unsigned int slot;                                                                           /* 由成功块数奇偶确定本次 RX 槽。 */
     const char *stage = "PRECHECK";                                                              /* 若前置条件未满足，诊断定位到事务开始之前。 */
     int ret = 0;                                                                                 /* 依次保存配置、启动与完成检查的结果。 */
+
     if (!spi2_circ.active || spi2_circ.failed || dev != spi2_circ.dev) return -EPERM;            /* 拒绝未打开、已失败或不属于此设备的会话。 */
     if (!tx || !rx) return -EINVAL;                                                              /* 两个缓冲均是必需的，长度由固定块接口约定。 */
+
     spi = DEV_CFG(dev)->spi;                                                                     /* 取得持锁期间使用的 SPI 实例。 */
 
     /* 在片选有效前记录初态，拒绝把旧事件算作新帧完成。 */
@@ -180,6 +274,7 @@ int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx,
     txrem = spi2_circ_rc(spi2_circ.txch);                                                        /* 采样 TX 计数供前置诊断。 */
     status = spi->status;                                                                        /* 读片选前的 SPI 空闲和错误状态。 */
     rxrun = sys_read32(SPI2_DMA_REG(spi2_circ.rxch, 4)) & 1u;                                    /* 读取 RX START，持续接收通道应在运行。 */
+
     if (pending || !(spi->ctrl & SPI_CTL_SS) ||
         !(sys_read32(SPI2_DMA_REG(spi2_circ.rxch, 0)) & SPI2_CIRC_RELOAD) ||
         !rxrun ||
@@ -192,14 +287,18 @@ int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx,
     memcpy(spi2_dma_tx, tx, SPI2_CIRC_BYTES);                                                    /* 将整块复制到静态 TX SRAM，保证有限搬运的长度与存储区。 */
     stage = "TX_CONFIG";                                                                         /* 接下来若出错，日志定位到配置有限 TX。 */
     ret = spi2_dma_config_channel(spi2_circ.dma, spi, spi2_circ.txch, true, SPI2_CIRC_BYTES);    /* 为当前块重配一次 512 字节的无重载 TX。 */
+
     if (ret) goto fail;                                                                          /* 配置失败时隔离本次会话。 */
     stage = "TX_MODE";                                                                           /* 单独记录发送模式回读阶段。 */
+
     if (sys_read32(SPI2_DMA_REG(spi2_circ.txch, 0)) & SPI2_CIRC_RELOAD) {                        /* 若误开 TX 重载，将可能产生超出块长的时钟。 */
         ret = -EIO; goto fail;                                                                   /* 在选中从机前拒绝这个配置。 */
     }
+
     __asm__ volatile ("dmb" ::: "memory");                                                       /* 排序内存写入和通道启动，确保 DMA 能看见发送数据。 */
     stage = "TX_START";                                                                          /* 更新诊断阶段为启动发送通道。 */
     ret = dma_start(spi2_circ.dma, spi2_circ.txch);                                              /* TX 进入待命，尚未向其开放 SPI 请求。 */
+
     if (ret) goto fail;                                                                          /* 启动失败时停止继续交换。 */
     spi->ctrl &= ~SPI_CTL_SS;                                                                    /* 拉低片选，整个块只选中一次。 */
     start = k_cycle_get_32();                                                                    /* 记录本块完成轮询的起始时刻。 */
@@ -215,11 +314,14 @@ int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx,
         /* 在读取接收事件与计数之后再采样 SPI 状态，避免把最后一次 DMA 突发前的 FIFO 非空误配给完成事件。 */
         status = spi->status;                                                                    /* 等待获取 DMA 状态后再读取 FIFO 和忙位。 */
         rxrun = sys_read32(SPI2_DMA_REG(spi2_circ.rxch, 4)) & 1u;                                /* 采样 START，确认环是否仍在运行。 */
+
         if ((status & SPI_STATUS_ERR_MASK) || (pending & ~expected)) {                           /* 任一 SPI 错误或来自另一个槽的事件都意味着边界失配。 */
             stage = "RX_STATE"; ret = -EIO; break;                                               /* 将错误定位为 RX 状态异常。 */
         }
+
         if (!rxrun) {                                                                            /* 观察到 RX 短暂停止时判断是否正好在重载边界。 */
             uint32_t now = k_cycle_get_32();                                                     /* 同一轮用此周期值计算短暂停机的宽限。 */
+
             /* 仅在 TX 已耗尽且 RX 到达环尾附近时，容许短暂观察到重载前的 START 低电平。 */
             if (!checking_reload && slot && !txrem &&
                 (remaining <= SPI_DMA_STRANFER_MIN_LEN ||
@@ -227,18 +329,22 @@ int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx,
                 checking_reload = true;                                                          /* 记录已经开始宽限，后续轮询不重新计时。 */
                 reload_start = now;                                                              /* 保存首次允许短暂停机的时刻。 */
             }
+
             if (!checking_reload ||
                 k_cyc_to_us_floor32(now - reload_start) >= SPI2_CIRC_RELOAD_GRACE_US) {          /* 不符合重载条件或已超过宽限均作故障处理。 */
                 stage = "RX_STATE"; ret = -EIO; break;                                           /* 禁止把永久停机误认成已交付下一块。 */
             }
         }
         if (!ts.busy && txrem) { stage = "TX_COUNT"; ret = -EIO; break; }                        /* TX 报停但真实计数非零说明少发字节。 */
+
+        /* A 半区交付时需有半传输事件且 RX 剩 512 字节；B 半区需有整圈事件且 RX 已重载为 1024。刚打开时也可能读到 1024，所以还要核对事件、通道状态和两个 FIFO。 */
         if (rxrun && !ts.busy && pending == expected &&
             remaining == (slot ? SPI2_CIRC_RING_BYTES : SPI2_CIRC_BYTES) &&
             !(status & SPI_STATUS_BUSY) && (status & SPI_STATUS_TX_EMPTY)) {                     /* 同时检查 RX 运行、TX 停、槽事件、字节数、线端空闲与 TX FIFO 空。 */
             if (!(status & SPI_STATUS_RX_EMPTY)) { stage = "RX_FIFO"; ret = -EIO; }              /* 完成点 RX FIFO 必须为空，否则存在未入环的字节。 */
             break;                                                                               /* 本轮已确定最终状态。 */
         }
+
         if (k_cyc_to_us_floor32(k_cycle_get_32() - start) >= SPI2_CIRC_TIMEOUT_US) {             /* 以周期差限制本块完成等待。 */
             stage = "TIMEOUT"; ret = -ETIMEDOUT; break;                                          /* 轮询期限耗尽后让调用方关闭本会话。 */
         }
@@ -248,12 +354,14 @@ int spi_acts_spi2_circular_transfer(const struct device *dev, const uint8_t *tx,
     if (ret) goto fail;                                                                          /* 硬件检查失败时保持外部接收区未提交。 */
     spi->ctrl &= ~(SPI_CTL_TX_DRQ_EN | SPI_CTL_WR_MODE_MASK);                                    /* 只屏蔽 TX 请求和读写模式，RX 通道留给下一块。 */
     spi->ctrl |= SPI_CTL_SS;                                                                     /* 释放硬件片选，结束本块线路事务。 */
+
     /* 待决位写一清除，只确认本通道本次半环或整环事件，其他通道继续保留各自状态。 */
     sys_write32(expected, DMA_REG_BASE);                                                         /* 仅清除成功消费的那个锁存事件。 */
     __asm__ volatile ("dmb" ::: "memory");                                                       /* 在读取已完成槽前对内存与设备访问排序。 */
     memcpy(rx, spi2_dma_rx + slot * SPI2_CIRC_BYTES, SPI2_CIRC_BYTES);                           /* 根据首尾槽偏移，将整块复制到调用者缓冲。 */
-    ++spi2_circ.blocks;                                                                          /* 仅交付成功后才改变下次预期的槽与事件。 */
+    ++spi2_circ.blocks;                                                                          /* 确认已把本槽的 512 字节复制到调用者后再推进槽序号；下一笔可以使用另一半接收区。 */
     return 0;                                                                                    /* 返回后仍持锁，调用者等待下一次 READY 或关闭。 */
+    
 fail:
     spi2_circ.failed = true;                                                                     /* 标记故障使后续 transfer 不会使用这个环。 */
     spi->ctrl &= ~(SPI_CTL_TX_DRQ_EN | SPI_CTL_RX_DRQ_EN | SPI_CTL_WR_MODE_MASK);                /* 关闭收发请求和读写模式，等待调用者关闭通道。 */

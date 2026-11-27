@@ -26,8 +26,8 @@ enum p4_error {
 #define P4_ORIGIN "https://lifeiot.cmaiot.cn:8081"                                    /* 设备签名 POST 的业务服务源站。 */
 struct p4_record {
     void *source;                                                                    /* 由读取回调解释的源对象，上传调用结束前必须有效。 */
-    int (*read)(void *source, uint32_t offset, uint8_t *data, unsigned int size);    /* 业务引擎按绝对字节偏移读 size 字节到 data，足量返回 0，失败返回非零。 */
-    uint32_t size, duration_ms;                                                      /* 分别为完整文件长度（字节）和录音持续时间（毫秒）。 */
+    int (*read)(void *source, uint32_t offset, uint8_t *data, unsigned int size);    /* 相对本记录起点读取 size 字节到 data。完整录音以文件开头为零，分片视图以分片开头为零。足量返回 0。 */
+    uint32_t size, duration_ms;                                                      /* size 是此记录可读的字节数，分片视图中只计该片。duration_ms 是整段录音的时长，单位毫秒。 */
     const char *local_id, *filename, *recorded_at, *sample_md5, *sha256;             /* 本地唯一标识、文件名、录音时间、样本 MD5 和用于全文件校验的 SHA-256 文本。 */
     uint32_t part_size;                                                              /* 字节数；零采用 4 MiB。同一录音 ID 的提示应保持稳定。 */
 };
@@ -35,7 +35,21 @@ struct p4_io {
     void *context;                                                                /* 下列所有平台回调的首参数；由调用方管理生命周期。 */
     int (*device)(void *context, char imei[16], uint32_t *utc);                   /* 签名前填入 15 位 IMEI 加结尾零，并返回 UTC 整秒；0 成功。 */
     int (*random)(void *context, uint8_t *out, unsigned int size);                /* 调用平台随机源，成功时恰好填写 size 字节并返回 0。 */
-    /* request 同步发送规格和正文，在容量内写入响应并回填长度及 HTTP 状态。完整 2xx 且 SPI 正常收尾才返回 0，结果未知时交由业务层重新对账。 */
+
+    /**
+     * @brief            发送一笔 HTTP 请求，并在本次调用内接收结果。
+     * @param  context   平台上下文，验证命令绑定到本次上传的 p4_spi_context。
+     * @param  spec      以零结尾的请求描述，依次包含方法、URL 和头字段。
+     * @param  body      签名 POST 的内存正文，发送录音 PUT 时为 NULL。
+     * @param  record    PUT 的可回读分片，签名 POST 时为 NULL。
+     * @param  length    本次 HTTP 正文的总字节数。
+     * @param  response  调用方的响应缓冲，至少 capacity + 1 字节，末字节可供补零。
+     * @param  capacity  可接收的正文上限，单位字节。
+     * @param  received  输出已接收的正文字节数，补写的结尾零不计入长度。
+     * @param  http      输出服务器的 HTTP 状态码。调用方在发起请求前清零，尚未取得状态时为 0。
+     * @retval           0 表示适配层成功，负 P4_ERR_* 指示错误类别。调用方另用 HTTP 状态及响应正文判断业务结果。
+     * @note             板端默认绑定 p4_spi_request。PUT 收到 2xx 后，业务引擎仍用同一录音 ID 再发 init 查询服务端进度。
+     */
     int (*request)(void *context, const char *spec, const uint8_t *body,
                    const struct p4_record *record, uint32_t length, char *response, unsigned int capacity,
                    unsigned int *received, unsigned int *http);
@@ -71,7 +85,7 @@ struct p4_work {
   * @param  key_size：[输入]密钥长度，单位字节。
   * @param  io：[输入]平台设备、随机数、传输、事件及定时回调表。
   * @retval 0 为服务端完成且源摘要再次校验通过，负 P4_ERR_* 表示失败类别。
-  * @note   每次恢复从同一 localFileId 的 init 开始。请求次数、网络时限和无进展重试各有边界。
+  * @note   板间组 ACK 表示本组处理结果，HTTP 2xx 表示该 HTTP 请求被接受。这里用同一 localFileId 的 init 对账；业务确认完成且复核源摘要后才返回成功。
   */
 int p4_upload_run(struct p4_work *w, const struct p4_record *record,
                   const uint8_t *key, size_t key_size, const struct p4_io *io);

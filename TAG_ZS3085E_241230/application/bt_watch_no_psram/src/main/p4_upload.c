@@ -143,15 +143,15 @@ static bool network_expired(const struct p4_work *w, const struct p4_io *io)
 }
 
 /**
-  * @brief  签名并经适配层同步提交一笔 JSON POST。
-  * @param  w：[输入输出]本次录音上传独占的工作区，不可为空。
-  * @param  key：[输入]至少 key_size 字节的设备签名密钥。
-  * @param  key_size：[输入]密钥长度，单位字节。
-  * @param  io：[输入]平台设备、随机数、传输、事件及定时回调表。
-  * @param  path：[输入]要签名的服务端路径。
-  * @retval 成功返回 0，构造与 I/O 错误透传，超出预算返回 P4_ERR_LIMIT。
-  * @note   通过检查后才增加请求计数，正文使用工作区内存。
-  */
+ * @brief            签名并经适配层同步提交一笔 JSON POST。
+ * @param  w         [输入输出]本次录音上传独占的工作区，不可为空。
+ * @param  key       [输入]至少 key_size 字节的设备签名密钥。
+ * @param  key_size  [输入]密钥长度，单位字节。
+ * @param  io        [输入]平台设备、随机数、传输、事件及定时回调表。
+ * @param  path      [输入]要签名的服务端路径。
+ * @retval           成功返回 0，构造与 I/O 错误透传，超出预算返回 P4_ERR_LIMIT。
+ * @note             prepare_post 填好 w->spec。io->request 同步发送 w->body 中的 JSON，回填本次 HTTP 状态和响应字节数；调用前先检查网络窗口和请求次数。
+ */
 static int signed_post(struct p4_work *w, const uint8_t *key, size_t key_size,
                        const struct p4_io *io, const char *path)
 {
@@ -185,13 +185,13 @@ static int init_body(struct p4_work *w, const struct p4_record *r)
 }
 
 /**
-  * @brief  验证 HTTP 及业务状态，取出服务端结果对象。
-  * @param  w：[输入输出]本次录音上传独占的工作区，不可为空。
-  * @param  out：[输出]借用工作区响应文本的 result 对象。
-  * @param  done：[输出]是否为 SYNC_SUCCESS。
-  * @retval 0 为可识别的同步状态，-1 为 HTTP、JSON 或业务字段异常。
-  * @note   只接收 SYNCING 和 SYNC_SUCCESS；通过 HTTP 2xx 后还须校验业务状态。
-  */
+ * @brief        验证 HTTP 及业务状态，取出服务端结果对象。
+ * @param  w     [输入输出]本次录音上传独占的工作区，不可为空。
+ * @param  out   [输出]指向 w->response 中 result 对象的视图，下一笔请求复用此缓冲前须用完。
+ * @param  done  [输出]是否为 SYNC_SUCCESS。
+ * @retval       0 为可识别的同步状态，-1 为 HTTP、JSON 或业务字段异常。
+ * @note         先确认 HTTP 为 2xx，再要求业务字段 status 为字符串 "00000"。syncStatus 为 SYNCING 时继续对账，SYNC_SUCCESS 时进入完成校验。
+ */
 static int result(struct p4_work *w, struct p4_json *out, bool *done)
 {
     struct p4_json root;                                                        /* 根视图借用 w->response，直到下一次请求覆盖它。 */
@@ -233,13 +233,13 @@ static int identity(struct p4_work *w, struct p4_json r, bool completed)
 }
 
 /**
-  * @brief  检查服务端报告的已上传字节和连续区间边界。
-  * @param  r：[输入]服务端 result 对象。
-  * @param  size：[输入]源文件总字节数。
-  * @param  complete：[输入]true 表示执行完成状态的全长检查。
-  * @retval 0 合法，-1 为字段错误、边界越界或完成时长度不符。
-  * @note   最终确认同时要求累计数和从头连续数等于源长度。
-  */
+ * @brief            检查服务端报告的已上传字节和连续区间边界。
+ * @param  r         [输入]服务端 result 对象。
+ * @param  size      [输入]源文件总字节数。
+ * @param  complete  [输入]true 表示执行完成状态的全长检查。
+ * @retval           0 合法，-1 为字段错误、边界越界或完成时长度不符。
+ * @note             uploadedBytes 是已上传总量，contiguousUploadedBytes 是从文件开头连续上传的字节数。complete 为真时两者都须等于文件总长。
+ */
 static int progress(struct p4_json r, uint32_t size, bool complete)
 {
     uint32_t uploaded, contiguous;                                           /* 累计已上传量与从首字节起的连续已上传量分别比较。 */
@@ -266,13 +266,13 @@ static int part_read(void *context, uint32_t offset, uint8_t *data, unsigned int
 }
 /* 区间与头部验证完毕即释放局部栈帧，再进入传输层。 */
 /**
-  * @brief  验证全部待传区间，从第一项生成 PUT 元数据及回读窗口。
-  * @param  w：[输入输出]本次录音上传独占的工作区，不可为空。
-  * @param  r：[输入]已验证的服务端结果视图。
-  * @param  record：[输入]完整源记录。
-  * @retval 0 可以开始传输，-1 为字段、范围、URL、头部或容量错误。
-  * @note   服务端分片号与偏移顺序须一致且区间互不覆盖。一次只传一项，随后重新 init。
-  */
+ * @brief          验证全部待传区间，从第一项生成 PUT 元数据及回读窗口。
+ * @param  w       [输入输出]本次录音上传独占的工作区，不可为空。
+ * @param  r       [输入]已验证的服务端结果视图。
+ * @param  record  [输入]完整源记录。
+ * @retval         0 可以开始传输，-1 为字段、范围、URL、头部或容量错误。
+ * @note           验证所有待传区间后只取首项。将其原文件偏移交给 part_read，长度、预签名 URL 和请求头用于一次 PUT。PUT 成功后重新 init 查询进度。
+ */
 static __attribute__((noinline)) int put_spec(struct p4_work *w, struct p4_json r, const struct p4_record *record)
 {
     struct p4_json pending, part, value;                                                           /* 分别借用待传数组、本次分片以及某个字段或前项的视图。 */
@@ -387,7 +387,7 @@ static int request_error(int ret, unsigned int http, bool put)
   * @param  key_size：[输入]密钥长度，单位字节。
   * @param  io：[输入]平台设备、随机数、传输、事件及定时回调表。
   * @retval 0 为服务端完成且源摘要再次校验通过，负 P4_ERR_* 表示失败类别。
-  * @note   每次恢复从同一 localFileId 的 init 开始。请求次数、网络时限和无进展重试各有边界。
+  * @note   板间组 ACK 表示本组处理结果，HTTP 2xx 表示该 HTTP 请求被接受。这里用同一 localFileId 的 init 对账；业务确认完成且复核源摘要后才返回成功。
   */
 int p4_upload_run(struct p4_work *w, const struct p4_record *r,
                   const uint8_t *key, size_t key_size, const struct p4_io *io)

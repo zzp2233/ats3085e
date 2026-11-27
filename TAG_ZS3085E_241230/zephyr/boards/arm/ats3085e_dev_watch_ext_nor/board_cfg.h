@@ -75,7 +75,7 @@
 
 #define CONFIG_SPI_1           					0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPI_1_NAME      				"SPI_1"
-#define CONFIG_SPI_2                            1                    /* 启用板级 SPI2 设备实例。 */
+#define CONFIG_SPI_2                            1                    /* 此板头直接定义 SPI2 开关。应用命令表用 IS_ENABLED(CONFIG_SPI_2) 判断是否编入相关子命令。 */
 #define CONFIG_SPI_2_NAME      				"SPI_2"      /* 设备注册名，与应用获取 SPI2 控制器的名称一致。 */
 #define CONFIG_SPI_3           					0    /* 对应板级设备开关：1配置该实例，0不启用。 */
 #define CONFIG_SPI_3_NAME      				"SPI_3"

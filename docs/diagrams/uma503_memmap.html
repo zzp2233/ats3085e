@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; width: 1600px; height: 900px; background: #fff; }
+  body { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color: #1b2a3a; }
+  .canvas { position: relative; width: 1600px; height: 900px; }
+  .title { position: absolute; left: 40px; top: 24px; font-size: 33px; font-weight: 700; }
+  .title .bar { display: inline-block; width: 10px; height: 33px; background: #ef6c00; vertical-align: -4px; margin-right: 14px; }
+  .sub { position: absolute; left: 64px; top: 70px; font-size: 17px; color: #5b6b7c; }
+  .panel { position: absolute; top: 112px; width: 720px; height: 660px; background: #f7fafd; border: 1px solid #d6e2ef; border-radius: 10px; }
+  .ptitle { position: absolute; top: 126px; font-size: 19px; font-weight: 700; }
+  .ptitle small { font-size: 13px; color: #7b8794; font-weight: 400; margin-left: 10px; font-family: Consolas, monospace; }
+  .addr { position: absolute; font-family: Consolas, monospace; font-size: 12.5px; color: #6b7a89; }
+  .seg { position: absolute; width: 210px; border-radius: 3px; color: #fff; font-size: 12px; padding: 5px 9px; box-sizing: border-box; overflow: hidden; }
+  .note { position: absolute; font-size: 12.5px; color: #3f4f5f; line-height: 1.5; }
+  .note b { font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <div class="title"><span class="bar"></span>UMA503 内存地图：代码 512 KB 在 Flash，你的数据只有 32 KB</div>
+  <div class="sub">数值取自 2026-11-26 的 app.map 与 app_linkscript_single_sim_xip.ld · 当前构建为 XIP 模式</div>
+
+  <!-- Flash 面板 -->
+  <div class="panel" style="left:40px"></div>
+  <div class="ptitle" style="left:62px">Flash · 512 KB <small>0x8037A000, len 0x80000</small></div>
+
+  <div class="addr" style="left:62px;top:214px">0x8037A000</div>
+  <div class="seg" style="left:250px;top:208px;height:24px;background:#c9d6e4;color:#31465c;font-size:11px;padding:4px 9px">应用头 .initdata（32 B）</div>
+
+  <div class="addr" style="left:62px;top:258px">0x8037A020</div>
+  <div class="seg" style="left:250px;top:252px;height:34px;background:#7aa7d9;font-size:11px;padding:6px 9px">.data 初值 9,024 B</div>
+
+  <div class="addr" style="left:62px;top:330px">0x8037C380</div>
+  <div class="seg" style="left:250px;top:322px;height:234px;background:#1f5f9e;padding:12px 10px;font-size:13px;line-height:1.6">
+    .text + .rodata<br>209,536 B<br>占应用区 40%
+  </div>
+
+  <div class="addr" style="left:62px;top:566px">0x803AE800</div>
+  <div class="seg" style="left:250px;top:558px;height:186px;background:#f2f6fa;border:1px dashed #b9cbdb;color:#7f93a6;padding:12px 10px;font-size:12px;line-height:1.6">
+    空闲 305,696 B（58%）<br><span style="font-size:11px">还剩一份完整镜像的空间</span>
+  </div>
+
+  <div class="note" style="left:500px;top:190px;width:236px">
+    <b>起点不是 0x80000000。</b><br>
+    variable_def.mk 写死 APP_CODE_XIP_FLASH_ORIGIN=0x008037A000。这 512 KB 是 2 MB Flash 里划给你的窗口。
+  </div>
+
+  <div class="note" style="left:500px;top:352px;width:236px">
+    <b>热点代码靠 .data 搬到 RAM。</b><br>
+    链接脚本把 .spi_crc.text、.spi_dma.text 归进 .data，启动时从 Flash 拷到 RAM 执行。XIP 取指要等 Flash，SPI 热路径在 RAM 里跑才不卡顿。
+  </div>
+
+  <div class="note" style="left:500px;top:586px;width:236px">
+    <b>链接期就会报错。</b><br>
+    ASSERT(__flash_end &lt;= ORIGIN(flash)+LENGTH(flash)) 把超限拦在链接阶段，代码超 512 KB 直接失败。
+  </div>
+
+  <!-- RAM 面板 -->
+  <div class="panel" style="left:840px"></div>
+  <div class="ptitle" style="left:862px">RAM · 32 KB <small>0x7E040800, len 0x8000</small></div>
+
+  <div class="addr" style="left:862px;top:214px">0x7E040800</div>
+  <div class="seg" style="left:1050px;top:208px;height:154px;background:#2e7d32;padding:10px;font-size:13px;line-height:1.6">
+    .data 9,024 B<br>占 27.5%<br><span style="font-size:11px;opacity:.9">有初值的全局变量</span>
+  </div>
+
+  <div class="addr" style="left:862px;top:382px">0x7E042B40</div>
+  <div class="seg" style="left:1050px;top:376px;height:342px;background:#ef6c00;padding:10px;font-size:13px;line-height:1.6">
+    .bss 20,000 B<br>占 61%<br><span style="font-size:11px;opacity:.92">未初始化变量、静态数组、SPI 描述符与收发槽</span>
+  </div>
+
+  <div class="addr" style="left:862px;top:740px">0x7E047960</div>
+  <div class="seg" style="left:1050px;top:730px;height:34px;background:#fff5e6;border:1px dashed #e0b077;color:#a06a24;font-size:11.5px;padding:7px 9px">
+    空闲仅 3,744 B（11.4%）
+  </div>
+
+  <div class="note" style="left:1282px;top:196px;width:262px">
+    <b>88.6% 已经用掉了。</b><br>
+    .data + .bss = 29,024 B / 32,768 B。往 .bss 加静态数组要按字节算账。
+  </div>
+
+  <div class="note" style="left:1282px;top:392px;width:262px">
+    <b>所以大缓冲只能 malloc。</b><br>
+    spi_link_file_slave.h 的 group_buffer = malloc(min(文件字节, 100×480))，约 48 KB，会话结束时 free。
+  </div>
+
+  <div class="note" style="left:1282px;top:576px;width:262px">
+    <b>堆不在这 32 KB 里。</b><br>
+    LDFLAGS 有 --wrap=_malloc_r，malloc 走 SDK 堆实现，所以 10 KB 任务栈能分配成功。
+  </div>
+
+  <div style="position:absolute;left:40px;top:836px;font-size:13px;color:#8695a4">
+    检查手段：app.map 里搜 __ram_end、__flash_end 与 .bss；.ld 里两个 ASSERT 负责在链接期拦住越界。
+  </div>
+</div>
+</body>
+</html>

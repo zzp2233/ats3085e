@@ -3,7 +3,7 @@
 #define SPI_LINK_BLOCK_H_
 #include "spi_link_swap.h"                                                             /* 引入单个 V3 逻辑帧的格式、编码与校验。 */
 #define SWAP_BLOCK_FRAMES 2u                                                           /* 一个物理块固定含两个逻辑槽。 */
-#define SWAP_BLOCK_SIZE (SWAP_SIZE * SWAP_BLOCK_FRAMES)                                /* DMA 和片选覆盖两个整帧，共 512 字节。 */
+#define SWAP_BLOCK_SIZE (SWAP_SIZE * SWAP_BLOCK_FRAMES)                                /* 一笔片选可交换 512 字节。测试路径把它分成两个 v3 逻辑帧，文件路径则在同样大小的物理块内放一份文件协议帧。 */
 #define SWAP_BLOCK_PAYLOAD ((SWAP_SIZE - SWAP_HDR - SWAP_TAIL) * SWAP_BLOCK_FRAMES)    /* 剔除两个帧头和两个帧尾，测试载荷合计 480 字节。 */
 #define SWAP_BLOCK_IDLE 32767u                                                         /* 启动回包约定的块号，展开为 65534 和 65535。 */
 

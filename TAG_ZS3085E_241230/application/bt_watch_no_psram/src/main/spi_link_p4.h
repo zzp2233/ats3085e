@@ -59,14 +59,14 @@ static void p4_spi_stack(struct p4_spi_context *c, const char *stage)
 }
 
 /**
-  * @brief  将一页响应按连续偏移放入 P4 响应缓冲。
-  * @param  context：[输入输出]本次请求的 p4_spi_context。
-  * @param  offset：[输入]应接续的响应字节偏移。
-  * @param  data：[输入]至少 size 字节的分页数据。
-  * @param  size：[输入]页内字节数。
-  * @retval 0 成功，-EFBIG 为页偏移不连续或容量不足。
-  * @note   调用者在容量外另留一个结尾零字节，已接收长度按实际页面累加。
-  */
+ * @brief           将一页响应按连续偏移放入 P4 响应缓冲。
+ * @param  context  [输入输出]本次请求的 p4_spi_context。
+ * @param  offset   [输入]HTTP_READ 读回的响应正文偏移，必须等于已收字节数 used。
+ * @param  data     [输入]至少 size 字节的分页数据。
+ * @param  size     [输入]页内字节数。
+ * @retval          0 成功，-EFBIG 为页偏移不连续或容量不足。
+ * @note            503 向主机分页返回同一笔 HTTP 响应。调用者在 capacity 之外预留一字节补零，交给 JSON 解析器的字节数始终以 used 为准。
+ */
 static int p4_spi_receive(void *context, uint32_t offset, const uint8_t *data, unsigned int size)
 {
     struct p4_spi_context *c = context;                                                /* 取回保存响应缓冲和游标的适配上下文。 */
@@ -81,15 +81,15 @@ static int p4_spi_receive(void *context, uint32_t offset, const uint8_t *data, u
 }
 
 /**
-  * @brief  根据 SPI 协议块号回读当前 POST 正文或 PUT 分片。
-  * @param  context：[输入输出]保存内存正文或录音描述的源上下文。
-  * @param  index：[输入]从零开始的 480 字节块号。
-  * @param  data：[输出]至少 size 字节的缓冲。
-  * @param  size：[输入]本块实际字节数。
-  * @param  repair：[输入]补传标志，读取位置与首发相同。
-  * @retval 0 成功，-EINVAL 为读取范围越界，其他失败来自录音回调。
-  * @note   补发相同块使用相同数据源；若回读录音失败，则锁存 source.failed。
-  */
+ * @brief           根据 SPI 协议块号回读当前 POST 正文或 PUT 分片。
+ * @param  context  [输入输出]保存内存正文或录音描述的源上下文。
+ * @param  index    [输入]本次 HTTP 正文内的零基 SPI 块号，每块至多 480 字节。
+ * @param  data     [输出]至少 size 字节的缓冲。
+ * @param  size     [输入]本块实际字节数。
+ * @param  repair   [输入]补传标志，读取位置与首发相同。
+ * @retval          0 成功，-EINVAL 为读取范围越界，其他失败来自录音回调。
+ * @note            PUT 先用块号算出分片内偏移，再由 part_read 加上云端指定的分片起点。补传沿同一路径重读，源读取失败会置 source.failed。
+ */
 static int p4_spi_read(void *context, uint32_t index, uint8_t *data,
                         unsigned int size, bool repair)
 {
@@ -147,7 +147,7 @@ static int p4_spi_request(void *context, const char *spec, const uint8_t *body,
         shell_print(c->shell, "P4 RADIO request mode=%u; check COM6 for actual RF state", http->radio_test);
     }
 #endif
-    /* 将 P4 请求正文、偏移读回调和响应回收函数接入通用文件协议适配层。 */
+    /* sfile_send_data 通过 read_block 取发送正文，sfile_read_http_result 通过 receive 把响应页交回同一个 P4 请求。 */
     http->receive = p4_spi_receive; http->receive_context = c;
     x->http = http; x->source = &c->source; x->read_block = p4_spi_read;                         /* 每个正文数据块通过 p4_spi_read 从源获得。 */
     x->size = length; x->bad_block = UINT32_MAX; x->delivery_command = SFILE_START_HTTP;         /* 正常 P4 请求采用通用 HTTP 命令并关闭合成坏块。 */
@@ -181,7 +181,7 @@ static int p4_spi_request(void *context, const char *spec, const uint8_t *body,
     }
 #endif
     /* 收齐响应且硬件正常关闭方可返回成功，源、分页与传输错误要优先于服务器状态处理。 */
-    *received = c->used; *http_code = http->http_code;
+    *received = c->used; *http_code = http->http_code;                                           /* 两项分别是主机已收的正文长度和 503 报告的 HTTP 状态，函数返回值另行反映本次传输结果。 */
     if (!ret && (!http->response_complete || c->used != http->response_size)) ret = -EBADMSG;    /* 即使传输返回正常，也必须收到所有声明的响应页。 */
     shell_print(c->shell, "P4 HTTP http=%u bytes=%u complete=%u link_failed=%u ret=%d",
                 *http_code, *received, http->response_complete, http->link_failed, ret);
@@ -365,13 +365,15 @@ static int shell_p4upload(const struct shell *sh, size_t argc, char *argv[])
     struct sd_file *file;                                                                                      /* 打开后须保持到业务引擎退出才可关闭。 */
     int ret;
     int fault = 0;                                                                                             /* 缺省走正常传输，不施加故障事件。 */
+ 
     if (argc < 1 || argc > 4) {
         shell_error(sh, "Usage: app p4upload [14-digit test localFileId [128|4096 part KiB [fault]]]");
         return -EINVAL;                                                                                        /* 只接受命令本身及至多三个可选参数。 */
     }
 
     /* 允许通过命令显式选择本地 ID 和分片提示，所有格式检查均在打开资源及发送请求之前。 */
-    if (argc >= 2) {
+    if (argc >= 2) 
+    {
         unsigned int i;
         if (strlen(argv[1]) != 14) {                                                                           /* 测试 ID 长度须与业务约定相符。 */
             shell_error(sh, "P4 localFileId must be 14 digits; no request sent");
@@ -386,10 +388,14 @@ static int shell_p4upload(const struct shell *sh, size_t argc, char *argv[])
         /* Shell 命令同步执行，选定 ID 在 init、PUT 与 complete 间一直有效；再次运行须显式沿用同一 ID 才能对账。 */
         local_id = argv[1];                                                                                    /* 同步运行期间 argv 字符串一直由 Shell 保持有效。 */
     }
-    if (argc >= 3) {
+
+    if (argc >= 3) 
+    {
         if (!strcmp(argv[2], "128")) part_size = 128u * 1024u;                                                 /* 小分片提示用于对照服务器下发的实际范围。 */
         else if (!strcmp(argv[2], "4096")) part_size = P4_PART_SIZE;                                           /* 4096 KiB 对应本地允许的 4 MiB 提示。 */
-        else { shell_error(sh, "P4 part KiB must be 128 or 4096; no request sent"); return -EINVAL; }
+        else { 
+                shell_error(sh, "P4 part KiB must be 128 or 4096; no request sent"); return -EINVAL; 
+             }
     }
 #ifdef P4_SPI_WITNESS_TEST
     bool witness_once = argc == 4 && !strcmp(argv[3], "witness-once");                                         /* 仅用于整条 SPI 恢复链路的见证字注入分支。 */
@@ -410,7 +416,9 @@ static int shell_p4upload(const struct shell *sh, size_t argc, char *argv[])
     file = sd_fopen("/NOR:A/p4.m4a");
     if (!file) { shell_error(sh, "P4 source missing; flash the matching resource image"); return -ENOENT; }    /* 打开失败通常需要核对是否烧录了对应资源镜像。 */
     if ((uint32_t)file->size != p4_fixture.size) { sd_fclose(file); return -EBADMSG; }                         /* 实物资源大小须与本次配套的元数据吻合。 */
+
     job = k_heap_alloc(&sys_mem_pool, sizeof(*job), K_NO_WAIT);                                                /* 一次从系统堆申请整个任务工作区，不占 Shell 的小栈。 */
+    
     if (!job) {
         sd_fclose(file);                                                                                       /* 堆申请失败，立即关闭已经取得的资源。 */
         shell_error(sh, "P4 FAIL memory need=%u; no network request sent", (unsigned int)sizeof(*job));
@@ -421,6 +429,7 @@ static int shell_p4upload(const struct shell *sh, size_t argc, char *argv[])
 #ifdef P4_SPI_WITNESS_TEST
     job->context.witness_once = witness_once;                                                                  /* 只给显式要求该场景的本次任务启用破坏见证字。 */
 #endif
+
     /* 复制不可变录音描述并安装真实设备、随机源、传输、事件与重试计时回调。 */
     job->context.fault.mode = (unsigned int)fault;
     record = &job->record;                                                                                     /* 对堆中副本安装动态元数据，不改资源包中原始描述。 */
@@ -432,6 +441,7 @@ static int shell_p4upload(const struct shell *sh, size_t argc, char *argv[])
     job->io.request = p4_spi_request; job->io.event = p4_spi_event;                                            /* 请求指向 SPI 实际交付；阶段事件输出到当前 Shell。 */
     job->io.sleep_ms = p4_spi_sleep;                                                                           /* 退避等待使用内核的毫秒休眠实现。 */
     job->io.now_ms = p4_spi_now;                                                                               /* 恢复窗口按单调运行时间计算，分开处理墙钟 UTC。 */
+
     if (fault) {
 #ifdef P4_RADIO_TEST
         if (fault == 64 || fault == 128) {                                                                     /* 两种射频场景由真实从机无线控制处理，走正常 SPI 请求回调。 */

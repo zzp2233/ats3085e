@@ -1,3 +1,4 @@
+# 本文件给出当前厂商 SDK 所用 Zephyr 内核的版本。构建时从以下五个字段生成版本字符串和数值宏。
 VERSION_MAJOR = 2
 VERSION_MINOR = 7
 PATCHLEVEL = 0

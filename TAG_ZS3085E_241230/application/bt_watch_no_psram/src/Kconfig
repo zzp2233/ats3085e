@@ -1,4 +1,4 @@
-# Kconfig - ACTIONS primitive options for sdk version 2.0
+# 本文件定义 BT Watch 各业务模块的 Kconfig 选项及依赖。配置片段给这些符号赋值，CMake 随后用 CONFIG_ 前缀的变量选择相应源码。
 
 #
 # Copyright (c) 2015 Intel Corporation
@@ -16,6 +16,7 @@
 # limitations under the License.
 #
 
+# 主应用总开关，缺省关闭。应用 prj.conf 打开后，src/CMakeLists.txt 会处理 main 的源文件清单。
 menuconfig BT_MAIN_APP
 	bool
 	prompt "Btbox Main App Support"
@@ -24,6 +25,7 @@ menuconfig BT_MAIN_APP
 	This option enable or disable btbox main app
 
 if BT_MAIN_APP
+# 从下列 I²S、DAC 两种输出策略中选一项。depends on 约束可用条件，select 在当前选项启用时选入目标。
 choice
 	prompt "audio policy for output channel"
 	default AUDIO_OUTPUT_DAC
@@ -31,6 +33,7 @@ choice
 	help
 	  Select audio policy for output channel
 
+# 在输出通道选择中走 I²S，并选入 I²S 发送和重采样支持。
 config AUDIO_OUTPUT_I2S
 	bool
 	prompt "output to i2s channel"
@@ -39,6 +42,7 @@ config AUDIO_OUTPUT_I2S
 	help
 	This option select audio output to i2s
 
+# 在输出通道选择中使用 DAC，这是上方 choice 的默认分支。
 config AUDIO_OUTPUT_DAC
 	bool
 	prompt "output to dac channel"
@@ -47,6 +51,7 @@ config AUDIO_OUTPUT_DAC
 	This option select audio output to dac
 endchoice
 
+# 允许立体声 DAC 输出，是下方左右声道互换的前提。
 config AUDIO_OUT_STEREO_ENABLE
 	bool
 	prompt "output to stereo dac channel"
@@ -54,6 +59,7 @@ config AUDIO_OUT_STEREO_ENABLE
 	help
 	This option select audio output to dac
 
+# 仅使用左路输出，并选中右声道静音。
 config AUDIO_OUT_LEFT_ONLY
 	bool
 	prompt "output to left dac channel"
@@ -62,6 +68,7 @@ config AUDIO_OUT_LEFT_ONLY
 	help
 	This option select audio output to dac
 
+# 选择仅使用右路输出的策略。
 config AUDIO_OUT_RIGHT_ONLY
 	bool
 	prompt "output to right dac channel"
@@ -70,6 +77,7 @@ config AUDIO_OUT_RIGHT_ONLY
 	help
 	This option select audio output to dac
 
+# 媒体框架启用时可选择输出采样率转换。
 config OUTPUT_RESAMPLE
 	bool
 	prompt "allow resample out put rate"
@@ -78,6 +86,7 @@ config OUTPUT_RESAMPLE
 	help
 	This option select audio output to dac
 
+# 在立体声输出下交换左右声道；下方条件块给出相应的音效输出模式默认值。
 config AUDIO_OUT_LEFT_RIGHT_SWAP
 	bool
 	prompt "output swap left/right dac channel"
@@ -87,12 +96,14 @@ config AUDIO_OUT_LEFT_RIGHT_SWAP
 	This option select audio output swap left/right dac
 
 if AUDIO_OUT_LEFT_RIGHT_SWAP
+# 左右互换生效时给这个已有配置符号追加一个条件默认值。
 config MEDIA_EFFECT_OUTMODE
 	default 1
 endif
 
 endif # BT_MAIN_APP
 
+# 启用启动器；其时钟刷新策略由下面两个选项控制。
 menuconfig LAUNCHER_APP
 	bool "Launcher App"
 	default n
@@ -100,12 +111,14 @@ menuconfig LAUNCHER_APP
 	  Enable launcher app
 
 if LAUNCHER_APP
+# 默认时钟刷新周期，单位为毫秒。
 config CLOCK_DEF_REFR_PERIOD
 	int "Clock Default Update Period in Milliseconds"
 	default 1000
 	help
 	  Set clock default update period in milliseconds
 
+# 配置表盘选择器是否使用滑动视图。
 config CLOCK_SELECTOR_USE_VIEW_SLIDING
 	bool "Clock Selector Implemention Use View Sliding"
 	default y
@@ -113,6 +126,7 @@ config CLOCK_SELECTOR_USE_VIEW_SLIDING
 	  Clock selector implemention use view sliding to accelerate performance
 endif # LAUNCHER_APP
 
+# 蓝牙通话需要媒体播放器和经典蓝牙，启用时一并选入语音通道、缓冲及编解码支持。
 menuconfig BT_CALL_APP
 	bool
 	prompt "Bt Call App Support"
@@ -137,6 +151,7 @@ menuconfig BT_CALL_APP
 
 if BT_CALL_APP
 
+# 决定通话应用是否强制播报电话号码。
 config BT_CALL_FORCE_PLAY_PHONE_NUM
 	bool
 	prompt "force play phone number"
@@ -147,6 +162,7 @@ config BT_CALL_FORCE_PLAY_PHONE_NUM
 
 endif # BT_CALL_APP
 
+# 本地音乐入口，依赖播放器并选入本地播放和蓝牙发射功能。
 menuconfig LCMUSIC_APP
 	bool
 	prompt "Local Music App Support"
@@ -159,6 +175,7 @@ menuconfig LCMUSIC_APP
 
 if LCMUSIC_APP
 
+# 本地音乐启用后，可继续启用磁盘音乐子功能。
 config DISK_MUSIC_APP
 	bool
 	prompt "Disk Music App Support"
@@ -167,6 +184,7 @@ config DISK_MUSIC_APP
 	help
 	This option enables or disable the disk music app.
 
+# 控制本地音乐是否做文件格式检查。
 config FORMAT_CHECK
 	bool
 	prompt "Format Check Support"
@@ -175,6 +193,7 @@ config FORMAT_CHECK
 	help
 	This option enables or disable the format check.
 
+# 决定本地音乐是否启用后台磁盘扫描。
 config BKG_SCAN_DISK
 	bool
 	prompt "Background scan disk support"
@@ -185,6 +204,7 @@ config BKG_SCAN_DISK
 
 endif # LCMUSIC_APP
 
+# 本地播放所需的文件迭代、文件系统、多卷与缓冲支持由这里选入，其中包括 FILE_SYSTEM。
 config LOCAL_PLAYER
 	bool
 	prompt "local music player support"
@@ -205,6 +225,7 @@ config LOCAL_PLAYER
 	help
 	This option enables or disable utils player of local music file.
 
+# 经典蓝牙发射播放所需的 A2DP、控制协议和 SBC 编码器随开关选入。
 config BT_TRANSMIT
 	bool
 	prompt "bt transmit player support"
@@ -220,6 +241,7 @@ config BT_TRANSMIT
 	help
 	This option enables or disable bt transmit player
 
+# 蓝牙音乐播放依赖媒体框架并选入 A2DP 等接收侧组件，AAC 解码还有单独条件。
 config BT_PLAYER
 	bool "bt music player support"
 	depends on  MEDIA_PLAYER
@@ -239,6 +261,7 @@ config BT_PLAYER
 	help
 	  This option enables bt music player.
 
+# 闹钟使用本地媒体播放，启用时引入闹钟、文件系统和播放器管理。
 config ALARM_APP
 	bool
 	prompt "alarm App Support"
@@ -250,6 +273,7 @@ config ALARM_APP
 	help
 	This option enables or disable the alarm app.
 
+# NSM 测试应用，同时依赖媒体播放器和蓝牙管理器。
 config NSM_APP
 	bool
 	prompt "NSM test"
@@ -259,12 +283,14 @@ config NSM_APP
 	help
 	This option enables the nsm test.
 
+# BTC 的 SRRC 文件路径，提供给需要该文件的测试配置。
 config IPMSG_BTC_SRRC_NAME
 	string "MP BTC srrc file name"
 	default "/NOR:K/srrc.bin"
 	help
 	  MP BTC SRRC file name
 
+# 读卡器通过 USB 大容量存储对外提供卷，启用时同时引入多卷与热插拔支持。
 config CARD_READER_APP
 	bool
 	prompt "CARD READER App Support"
@@ -276,6 +302,7 @@ config CARD_READER_APP
 	help
 	This option enables or disable the card reader app.
 
+# 使上层构建可选入充电应用目录。
 config CHARGER_APP
 	bool
 	prompt "Charger App Support"
@@ -283,6 +310,7 @@ config CHARGER_APP
 	help
 	This option enables or disable the Charger app.
 
+# 控制 NV 应用是否纳入配置。
 config NV_APP
 	bool
 	prompt "NV app"
@@ -290,6 +318,7 @@ config NV_APP
 	help
 	This option enables the NV app.
 
+# 控制涂鸦应用是否纳入配置。
 config TUYA_APP
 	bool
 	prompt "TUYA app"
@@ -297,6 +326,7 @@ config TUYA_APP
 	help
 	This option enables the TUYA app.
 
+# 应用开发通信选项，受此处列出的蓝牙音乐配置约束。
 config AP_USER_COMM
 	bool
 	prompt "ap_develop"
@@ -305,6 +335,7 @@ config AP_USER_COMM
 	help
 	This option enables the app develop.
 
+# 蓝牙厂商服务会用到文件流接口。
 config BT_VENDOR
 	bool
 	prompt "bt vendor service support"
@@ -313,6 +344,7 @@ config BT_VENDOR
 	help
 	This option enables or disable bt vendor service
 
+# PC 工具的总开关，以串口控制台为前提。
 menuconfig TOOL
 	bool "PC Tool Support"
 	depends on UART_CONSOLE
@@ -321,6 +353,7 @@ menuconfig TOOL
 	This option enables the PC TOOL
 
 if TOOL
+# PC 工具线程的栈大小，以字节计。
 config TOOL_STACK_SIZE
 	int "PC Tool thread stack size"
 	depends on TOOL
@@ -328,6 +361,7 @@ config TOOL_STACK_SIZE
 	help
 	This option configure PC Tool thread stack
 
+# ASET 工具功能要求同时启用工具和媒体框架。
 config TOOL_ASET
 	bool "PC TOOL ASET Support"
 	depends on TOOL && MEDIA
@@ -335,6 +369,7 @@ config TOOL_ASET
 	help
 	This option enables the PC TOOL ASET
 
+# ASQT 工具功能还会选入流和零数据流实现。
 config TOOL_ASQT
 	bool "PC TOOL ASQT Support"
 	depends on TOOL && MEDIA
@@ -344,6 +379,7 @@ config TOOL_ASQT
 	help
 	This option enables the PC TOOL ASQT
 
+# ECTT 工具功能依赖工具及媒体框架。
 config TOOL_ECTT
 	bool "PC TOOL ECTT Support"
 	depends on TOOL && MEDIA
@@ -351,6 +387,7 @@ config TOOL_ECTT
 	help
 	This option enables the PC TOOL ECTT
 
+# 经蓝牙 SPP 提供 SDK 测试通路，依赖工具、媒体和蓝牙配置。
 config SPP_TEST_SUPPORT
 	bool
 	prompt "sdk test support through SPP"
@@ -363,6 +400,7 @@ config SPP_TEST_SUPPORT
 
 endif # TOOL
 
+# 应用层 OTA 开关，同时引入升级核心和数据流接口。
 menuconfig OTA_APP
 	bool
 	prompt "OTA App Support"
@@ -372,6 +410,7 @@ menuconfig OTA_APP
 	help
 	This option enable or disable ota app
 
+# 选择 OTA 前台升级方式。
 config OTA_FOREGROUND
 	bool "OTA Foreground Support"
 	depends on OTA_APP
@@ -379,6 +418,7 @@ config OTA_FOREGROUND
 	help
 	  This option enable OTA foreground upgrade.
 
+# 选择 OTA 后台升级方式。
 config OTA_BACKGROUND
 	bool "OTA background Support"
 	depends on OTA_APP
@@ -386,6 +426,7 @@ config OTA_BACKGROUND
 	help
 	  This option enable OTA background upgrade.
 
+# 允许 OTA 应用使用系统恢复功能，还要满足 SYSTEM_RECOVERY。
 config SYSTEM_RECOVERY_APP_SUPPORT
 	bool
 	prompt "System Recovery App Support"
@@ -395,6 +436,7 @@ config SYSTEM_RECOVERY_APP_SUPPORT
 	help
 	This option enable or disable system recovery app
 
+# OTA 升级核心引入分区信息和固件版本支持。
 config OTA_UPGRADE
 	bool "OTA Upgrade Support"
 	default n
@@ -404,6 +446,7 @@ config OTA_UPGRADE
 	  This option enable OTA upgrade.
 
 if OTA_UPGRADE
+# 启用恢复固件所用的数据流支持。
 config OTA_RECOVERY
 	bool "OTA recovery firmware Support"
 	select STREAM
@@ -412,6 +455,7 @@ config OTA_RECOVERY
 	help
 	  This option enable OTA recovery firmware.
 
+# 恢复应用还要求 OTA 恢复固件功能已启用。
 config OTA_RECOVERY_APP
 	bool "OTA recovery application Support"
 	default n
@@ -419,6 +463,7 @@ config OTA_RECOVERY_APP
 	help
 	  This option enable OTA recovery application.
 
+# 恢复模式所用升级暂存分区的设备名。
 config OTA_TEMP_PART_DEV_NAME
 	string "OTA temp partition device name"
 	depends on OTA_RECOVERY
@@ -426,6 +471,7 @@ config OTA_TEMP_PART_DEV_NAME
 	help
 	  Specify the device name for temp partition.
 
+# 提供 SPI1 NOR 驱动的设备名，仅在对应驱动启用时配置。
 config XSPI1_NOR_ACTS_DEV_NAME
 	string "SPI1 NOR flash device name"
 	depends on XSPI_NOR_ACTS
@@ -433,6 +479,7 @@ config XSPI1_NOR_ACTS_DEV_NAME
 	help
 	  Specify the device name for SPI1 NOR flash driver.
 
+# 使用卷管理和文件流从存储卡读取升级包。
 config OTA_BACKEND_SDCARD
     bool "OTA upgrade by SDCARD Support"
 #	select MMC
@@ -444,6 +491,7 @@ config OTA_BACKEND_SDCARD
     help
       This option enables OTA upgrade by SDCARD.
 
+# 通过蓝牙 SPP/BLE 数据流接收升级包。
 config OTA_BACKEND_BLUETOOTH
     bool "OTA upgrade by Bluetooth Support"
 	depends on BT_MANAGER
@@ -453,6 +501,7 @@ config OTA_BACKEND_BLUETOOTH
     help
       This option enables OTA upgrade by Bluetooth SPP/BLE.
 
+# 使用临时闪存分区作为升级数据来源。
 config OTA_BACKEND_TEMP_PART
     bool "OTA upgrade by spinor Support"
     select FLASH
@@ -460,6 +509,7 @@ config OTA_BACKEND_TEMP_PART
     help
       This option enables OTA upgrade by spinor.
 
+# 文件差分升级要求关闭 OTA_RECOVERY。
 config OTA_FILE_PATCH
     bool "OTA file patch Support"
     depends on !OTA_RECOVERY
@@ -467,6 +517,7 @@ config OTA_FILE_PATCH
     help
       This option enables OTA file patch.
 
+# 选择基于文件系统的升级存储，通过卷管理器和文件流访问。
 config OTA_STORAGE_FS
     bool "OTA upgrade by SDCARD Support"
 	select MUTIPLE_VOLUME_MANAGER
@@ -475,6 +526,7 @@ config OTA_STORAGE_FS
     help
       This option enables OTA upgrade by SDCARD.
 
+# 恢复流程中支持多个存储目标。
 config OTA_MUTIPLE_STORAGE
     bool "OTA upgrade Support multiple storage"
     depends on OTA_RECOVERY
@@ -482,6 +534,7 @@ config OTA_MUTIPLE_STORAGE
     help
       This option enables OTA upgrade by multiple storage.
 
+# 配置 OTA 资源差分升级支持。
 config OTA_RES_PATCH
     bool "OTA res patch Support"
     default n
@@ -489,6 +542,7 @@ config OTA_RES_PATCH
       This option enables OTA res patch.
 endif
 
+# 经蓝牙输出日志，依赖 ACTLOG 并选入日志用户输出、蓝牙管理和线程定时器。
 config BT_LOG_SERVICE
 	bool "BT Log Service"
 	depends on ACTLOG
@@ -500,12 +554,14 @@ config BT_LOG_SERVICE
 
 if BT_LOG_SERVICE
 
+# 蓝牙日志线程栈容量，单位为字节。
 config BT_LOG_SERVICE_STACK_SIZE
 	int "BT Log Service Stack Size"
 	default 2048
 	help
 	  Set BT log service stack size.
 
+# 蓝牙日志线程的调度优先级。
 config BT_LOG_SERVICE_PRIORITY
 	int "BT Log Service Thread Priority"
 	default 11
@@ -514,6 +570,7 @@ config BT_LOG_SERVICE_PRIORITY
 
 endif # BT_LOG_SERVICE
 
+# 炬芯自动测试功能的总开关。
 menuconfig ACTIONS_ATT
     bool
     prompt "ACTIONS auto test"
@@ -523,6 +580,7 @@ menuconfig ACTIONS_ATT
 
 if ACTIONS_ATT
 
+# 自动测试时允许使用多个设备。
 config ATT_SUPPORT_MULTIPLE_DEVICES
     bool
     prompt "ACTIONS ATT SUPPORT MULTIPLE DEVICES"
@@ -531,6 +589,7 @@ config ATT_SUPPORT_MULTIPLE_DEVICES
     help
     This option whether ACTIONS auto test supports multiple devices
 
+# 自动测试中使用主动连接。
 config ATT_ACTIVE_CONNECTION
     bool
     prompt "ACTIONS auto test active connection"
@@ -539,6 +598,7 @@ config ATT_ACTIVE_CONNECTION
     help
     This option ACTIONS auto test active connection
 
+# 自动测试中的循环测试模式。
 config ATT_CYCLIC_TEST
     bool
     prompt "ACTIONS auto cyclic test"
@@ -549,6 +609,7 @@ config ATT_CYCLIC_TEST
 
 endif # ACTIONS_ATT
 
+# 随机操作测试开关，main 的 CMake 清单用它选择对应的测试源文件。
 config MONKEY_TEST
 	bool
 	prompt "support monkey test"
